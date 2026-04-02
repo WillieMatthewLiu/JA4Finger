@@ -25,12 +25,18 @@ func TestJA4FingerprinterBuildsExpectedFingerprint(t *testing.T) {
 		t.Fatalf("Fingerprint returned error: %v", err)
 	}
 
-	expected := "t13d0304h2_40b44b994229_f8fe4c4a86e3"
+	expected := "t13d0304h2_40b44b994229_ef5f37ab036a"
 	if result.Fingerprint != expected {
 		t.Fatalf("unexpected fingerprint: %s", result.Fingerprint)
 	}
 	if result.FingerprintType != "ja4" {
 		t.Fatalf("unexpected fingerprint type: %s", result.FingerprintType)
+	}
+	if result.CipherHashInput != "1301,1302,c02f" {
+		t.Fatalf("unexpected cipher hash input: %s", result.CipherHashInput)
+	}
+	if result.ExtHashInput != "000d,002b_0403,0804" {
+		t.Fatalf("unexpected ext hash input: %s", result.ExtHashInput)
 	}
 }
 

@@ -17,14 +17,16 @@ type ResultEmitter interface {
 }
 
 type FingerprintProcessor struct {
-	registry *fingerprint.Registry
-	emitter  ResultEmitter
+	registry        *fingerprint.Registry
+	emitter         ResultEmitter
+	debugHashInputs bool
 }
 
-func NewFingerprintProcessor(emitter ResultEmitter) *FingerprintProcessor {
+func NewFingerprintProcessor(emitter ResultEmitter, debugHashInputs bool) *FingerprintProcessor {
 	return &FingerprintProcessor{
-		registry: fingerprint.NewRegistry(fingerprint.JA4Fingerprinter{}),
-		emitter:  emitter,
+		registry:        fingerprint.NewRegistry(fingerprint.JA4Fingerprinter{}),
+		emitter:         emitter,
+		debugHashInputs: debugHashInputs,
 	}
 }
 
@@ -44,30 +46,34 @@ func (p *FingerprintProcessor) ProcessPacket(_ context.Context, evt capture.Pack
 		}
 		return err
 	}
+	if !p.debugHashInputs {
+		result.CipherHashInput = ""
+		result.ExtHashInput = ""
+	}
 
 	return p.emitter.Emit(result)
 }
 
-func RunPCAP(ctx context.Context, path string, stdout, stderr io.Writer) error {
+func RunPCAP(ctx context.Context, path string, stdout, stderr io.Writer, debugHashInputs bool) error {
 	source, err := capture.NewPCAPSource(ctx, path)
 	if err != nil {
 		return err
 	}
-	return runSource(ctx, source, stdout, stderr)
+	return runSource(ctx, source, stdout, stderr, debugHashInputs)
 }
 
-func RunLive(ctx context.Context, iface string, stdout, stderr io.Writer) error {
+func RunLive(ctx context.Context, iface string, stdout, stderr io.Writer, debugHashInputs bool) error {
 	source, err := capture.NewLiveSource(ctx, iface)
 	if err != nil {
 		return err
 	}
-	return runSource(ctx, source, stdout, stderr)
+	return runSource(ctx, source, stdout, stderr, debugHashInputs)
 }
 
-func runSource(ctx context.Context, source *capture.Source, stdout, stderr io.Writer) error {
+func runSource(ctx context.Context, source *capture.Source, stdout, stderr io.Writer, debugHashInputs bool) error {
 	defer source.Close()
 
-	processor := NewFingerprintProcessor(output.NewJSONLEmitter(stdout))
+	processor := NewFingerprintProcessor(output.NewJSONLEmitter(stdout), debugHashInputs)
 	pipeline, err := NewPipeline(ctx, source, processor)
 	if err != nil {
 		return err

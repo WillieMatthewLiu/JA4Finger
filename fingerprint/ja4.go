@@ -18,6 +18,8 @@ type Result struct {
 	Protocol        string `json:"protocol"`
 	FingerprintType string `json:"fingerprint_type"`
 	Fingerprint     string `json:"fingerprint"`
+	CipherHashInput string `json:"cipher_hash_input,omitempty"`
+	ExtHashInput    string `json:"ext_hash_input,omitempty"`
 }
 
 type Fingerprinter interface {
@@ -68,18 +70,20 @@ func (JA4Fingerprinter) Fingerprint(hello *decoder.ClientHello) (*Result, error)
 		alpnCode(hello.ALPNProtocols),
 	}
 
-	extInputs := formatHexList(extensions)
-	if len(sigAlgs) > 0 {
-		extInputs = append(extInputs, formatHexList(sigAlgs)...)
-	}
+	cipherInputs := formatHexList(ciphers)
+	cipherInput := strings.Join(cipherInputs, ",")
 
-	fingerprint := strings.Join(parts, "") + "_" + hashHex(formatHexList(ciphers)) + "_" + hashHex(extInputs)
+	extInput := buildExtHashInput(extensions, sigAlgs)
+
+	fingerprint := strings.Join(parts, "") + "_" + hashString(cipherInput) + "_" + hashString(extInput)
 	return &Result{
 		SrcIP:           hello.SrcIP,
 		SrcPort:         hello.SrcPort,
 		Protocol:        hello.Protocol,
 		FingerprintType: "ja4",
 		Fingerprint:     fingerprint,
+		CipherHashInput: cipherInput,
+		ExtHashInput:    extInput,
 	}, nil
 }
 
@@ -162,11 +166,36 @@ func formatHexList(values []uint16) []string {
 	return formatted
 }
 
-func hashHex(values []string) string {
-	if len(values) == 0 {
+func buildExtHashInput(extensions, sigAlgs []uint16) string {
+	filteredExts := make([]uint16, 0, len(extensions))
+	for _, ext := range extensions {
+		if ext == 0x0000 || ext == 0x0010 {
+			continue
+		}
+		filteredExts = append(filteredExts, ext)
+	}
+
+	extPart := strings.Join(formatHexList(filteredExts), ",")
+	if len(sigAlgs) == 0 {
+		return extPart
+	}
+
+	return extPart + "_" + strings.Join(formatHexListPreserveOrder(sigAlgs), ",")
+}
+
+func formatHexListPreserveOrder(values []uint16) []string {
+	formatted := make([]string, 0, len(values))
+	for _, value := range values {
+		formatted = append(formatted, decoder.FormatUint16Hex(value))
+	}
+	return formatted
+}
+
+func hashString(value string) string {
+	if value == "" {
 		return "000000000000"
 	}
-	sum := sha256.Sum256([]byte(strings.Join(values, ",")))
+	sum := sha256.Sum256([]byte(value))
 	return fmt.Sprintf("%x", sum[:])[:12]
 }
 

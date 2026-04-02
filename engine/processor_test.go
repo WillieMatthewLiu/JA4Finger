@@ -15,7 +15,7 @@ import (
 
 func TestFingerprintProcessorEmitsJA4Result(t *testing.T) {
 	emitter := &stubEmitter{}
-	processor := NewFingerprintProcessor(emitter)
+	processor := NewFingerprintProcessor(emitter, false)
 
 	if err := processor.ProcessPacket(context.Background(), tlsEvent(t, tlsRecord())); err != nil {
 		t.Fatalf("ProcessPacket returned error: %v", err)
@@ -24,14 +24,36 @@ func TestFingerprintProcessorEmitsJA4Result(t *testing.T) {
 	if emitter.result == nil {
 		t.Fatal("expected emitted result")
 	}
-	if emitter.result.Fingerprint != "t13d0304h2_40b44b994229_f8fe4c4a86e3" {
+	if emitter.result.Fingerprint != "t13d0304h2_40b44b994229_ef5f37ab036a" {
 		t.Fatalf("unexpected fingerprint: %s", emitter.result.Fingerprint)
+	}
+	if emitter.result.CipherHashInput != "" || emitter.result.ExtHashInput != "" {
+		t.Fatalf("did not expect debug hash inputs when debug mode is disabled: %#v", emitter.result)
+	}
+}
+
+func TestFingerprintProcessorEmitsDebugHashInputsWhenEnabled(t *testing.T) {
+	emitter := &stubEmitter{}
+	processor := NewFingerprintProcessor(emitter, true)
+
+	if err := processor.ProcessPacket(context.Background(), tlsEvent(t, tlsRecord())); err != nil {
+		t.Fatalf("ProcessPacket returned error: %v", err)
+	}
+
+	if emitter.result == nil {
+		t.Fatal("expected emitted result")
+	}
+	if emitter.result.CipherHashInput != "1301,1302,c02f" {
+		t.Fatalf("unexpected cipher hash input: %s", emitter.result.CipherHashInput)
+	}
+	if emitter.result.ExtHashInput != "000d,002b_0403,0804" {
+		t.Fatalf("unexpected ext hash input: %s", emitter.result.ExtHashInput)
 	}
 }
 
 func TestFingerprintProcessorIgnoresUnsupportedTraffic(t *testing.T) {
 	emitter := &stubEmitter{}
-	processor := NewFingerprintProcessor(emitter)
+	processor := NewFingerprintProcessor(emitter, false)
 
 	err := processor.ProcessPacket(context.Background(), tlsEvent(t, []byte("plain text")))
 	if err != nil {
@@ -44,7 +66,7 @@ func TestFingerprintProcessorIgnoresUnsupportedTraffic(t *testing.T) {
 
 func TestFingerprintProcessorReturnsDecodeErrors(t *testing.T) {
 	emitter := &stubEmitter{}
-	processor := NewFingerprintProcessor(emitter)
+	processor := NewFingerprintProcessor(emitter, false)
 
 	err := processor.ProcessPacket(context.Background(), tlsEvent(t, tlsRecord()[:len(tlsRecord())-1]))
 	if !errors.Is(err, decoder.ErrNeedMoreData) {

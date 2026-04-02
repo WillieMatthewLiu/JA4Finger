@@ -17,7 +17,7 @@ import (
 	"github.com/google/gopacket/pcapgo"
 )
 
-func withStubRunners(t *testing.T, live func(context.Context, string, io.Writer, io.Writer) error, pcap func(context.Context, string, io.Writer, io.Writer) error) {
+func withStubRunners(t *testing.T, live func(context.Context, string, io.Writer, io.Writer, bool) error, pcap func(context.Context, string, io.Writer, io.Writer, bool) error) {
 	t.Helper()
 
 	originalLive := runLiveMode
@@ -49,11 +49,11 @@ func TestRunLiveRequiresInterface(t *testing.T) {
 func TestRunLiveAcceptsInterface(t *testing.T) {
 	var called string
 	withStubRunners(t,
-		func(_ context.Context, iface string, _, _ io.Writer) error {
+		func(_ context.Context, iface string, _, _ io.Writer, _ bool) error {
 			called = iface
 			return nil
 		},
-		func(context.Context, string, io.Writer, io.Writer) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
 	)
 	if err := run([]string{"live", "--interface", "eth0"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -65,8 +65,8 @@ func TestRunLiveAcceptsInterface(t *testing.T) {
 
 func TestRunLiveShortFlag(t *testing.T) {
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer) error { return nil },
-		func(context.Context, string, io.Writer, io.Writer) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
 	)
 	if err := run([]string{"live", "-i", "eth0"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -86,8 +86,8 @@ func TestRunPCAPRequiresFile(t *testing.T) {
 func TestRunPCAPAcceptsFile(t *testing.T) {
 	var called string
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer) error { return nil },
-		func(_ context.Context, file string, _, _ io.Writer) error {
+		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
+		func(_ context.Context, file string, _, _ io.Writer, _ bool) error {
 			called = file
 			return nil
 		},
@@ -102,8 +102,8 @@ func TestRunPCAPAcceptsFile(t *testing.T) {
 
 func TestRunPCAPShortFlag(t *testing.T) {
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer) error { return nil },
-		func(context.Context, string, io.Writer, io.Writer) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
 	)
 	if err := run([]string{"pcap", "-f", "capture.pcap"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -153,8 +153,8 @@ func TestRunUnknownSubcommand(t *testing.T) {
 func TestRunPropagatesExecutorError(t *testing.T) {
 	expected := errors.New("boom")
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer) error { return expected },
-		func(context.Context, string, io.Writer, io.Writer) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool) error { return expected },
+		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
 	)
 
 	err := run([]string{"live", "--interface", "eth0"})
@@ -195,8 +195,31 @@ func TestRunPCAPEmitsStableJA4Record(t *testing.T) {
 	if !strings.Contains(out, "\"fingerprint_type\":\"ja4\"") {
 		t.Fatalf("expected JA4 output, got %q", out)
 	}
-	if !strings.Contains(out, "\"fingerprint\":\"t13d0304h2_40b44b994229_f8fe4c4a86e3\"") {
+	if !strings.Contains(out, "\"fingerprint\":\"t13d0304h2_40b44b994229_ef5f37ab036a\"") {
 		t.Fatalf("unexpected fingerprint output: %q", out)
+	}
+	if strings.Contains(out, "\"cipher_hash_input\"") || strings.Contains(out, "\"ext_hash_input\"") {
+		t.Fatalf("did not expect debug fields in default output: %q", out)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("did not expect stderr output: %q", stderr.String())
+	}
+}
+
+func TestRunPCAPDebugHashInputsEmitsHashInputs(t *testing.T) {
+	path := writePCAPFixture(t, fullTLSClientHello())
+	var stdout, stderr bytes.Buffer
+
+	if err := runWithContext(context.Background(), []string{"pcap", "--debug-hash-inputs", "--file", path}, &stdout, &stderr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "\"cipher_hash_input\":\"1301,1302,c02f\"") {
+		t.Fatalf("expected cipher hash input in debug output, got %q", out)
+	}
+	if !strings.Contains(out, "\"ext_hash_input\":\"000d,002b_0403,0804\"") {
+		t.Fatalf("expected ext hash input in debug output, got %q", out)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("did not expect stderr output: %q", stderr.String())

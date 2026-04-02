@@ -16,6 +16,12 @@ Analyze a PCAP file:
 go run ./cmd/ja4finger pcap --file ./capture.pcap
 ```
 
+Analyze a PCAP file and include the normalized JA4 pre-hash input strings for debugging:
+
+```bash
+go run ./cmd/ja4finger pcap --debug-hash-inputs --file ./capture.pcap
+```
+
 Monitor a live interface on Linux:
 
 ```bash
@@ -30,9 +36,20 @@ Output is JSON lines on stdout with these fields:
 - `fingerprint_type`
 - `fingerprint`
 
+When `--debug-hash-inputs` is enabled, each JSON object also includes:
+
+- `cipher_hash_input`
+- `ext_hash_input`
+
+These two fields are the normalized raw strings used as JA4 hash inputs, not the raw TLS bytes from the packet.
+
+- `cipher_hash_input` is the sorted non-GREASE cipher suite list.
+- `ext_hash_input` follows the FoxIO/Wireshark JA4 `c` segment input form: sorted non-GREASE extensions excluding `0000` (SNI) and `0010` (ALPN), followed by `_`, followed by the non-GREASE signature algorithms in their original ClientHello order.
+
 ## Operator Notes
 
 - `pcap` and `live` share the same decode, fingerprint, and output pipeline.
+- `--debug-hash-inputs` is available on both `pcap` and `live`.
 - `live` requires Linux `AF_PACKET` support plus privileges to open the requested interface.
 - Non-Linux builds return a startup error for `live` instead of silently pretending support exists.
 - The current implementation only fingerprints TLS ClientHello traffic that is fully present in a single captured TCP payload.

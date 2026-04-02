@@ -40,38 +40,47 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 
 	switch args[0] {
 	case "live":
-		iface, err := parseRequiredStringFlag("live", args[1:], "interface", "i", "name of the network interface to capture on")
+		parsed, err := parseCommandFlags("live", args[1:], "interface", "i", "name of the network interface to capture on")
 		if err != nil {
 			return err
 		}
-		return runLiveMode(ctx, iface, stdout, stderr)
+		return runLiveMode(ctx, parsed.value, stdout, stderr, parsed.debugHashInputs)
 	case "pcap":
-		file, err := parseRequiredStringFlag("pcap", args[1:], "file", "f", "path to the PCAP file to analyze")
+		parsed, err := parseCommandFlags("pcap", args[1:], "file", "f", "path to the PCAP file to analyze")
 		if err != nil {
 			return err
 		}
-		return runPCAPMode(ctx, file, stdout, stderr)
+		return runPCAPMode(ctx, parsed.value, stdout, stderr, parsed.debugHashInputs)
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
 }
 
-func parseRequiredStringFlag(subcommand string, args []string, longName, shortName, description string) (string, error) {
+type commandFlags struct {
+	value           string
+	debugHashInputs bool
+}
+
+func parseCommandFlags(subcommand string, args []string, longName, shortName, description string) (*commandFlags, error) {
 	fs := flag.NewFlagSet(subcommand, flag.ContinueOnError)
 	longVal := fs.String(longName, "", description)
 	shortVal := fs.String(shortName, "", fmt.Sprintf("short alias for --%s", longName))
+	debugHashInputs := fs.Bool("debug-hash-inputs", false, "include JA4 pre-hash input strings in output")
 	if err := fs.Parse(args); err != nil {
-		return "", err
+		return nil, err
 	}
 	if leftovers := fs.Args(); len(leftovers) > 0 {
-		return "", fmt.Errorf("%s subcommand does not accept positional arguments: %s", subcommand, strings.Join(leftovers, " "))
+		return nil, fmt.Errorf("%s subcommand does not accept positional arguments: %s", subcommand, strings.Join(leftovers, " "))
 	}
 	value := strings.TrimSpace(*longVal)
 	if value == "" {
 		value = strings.TrimSpace(*shortVal)
 	}
 	if value == "" {
-		return "", fmt.Errorf("%s subcommand requires --%s", subcommand, longName)
+		return nil, fmt.Errorf("%s subcommand requires --%s", subcommand, longName)
 	}
-	return value, nil
+	return &commandFlags{
+		value:           value,
+		debugHashInputs: *debugHashInputs,
+	}, nil
 }
