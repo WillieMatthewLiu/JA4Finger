@@ -23,3 +23,10 @@
 - [x] 4.2 Add unit tests for feature normalization and JA4-family fingerprint calculation behavior, including insufficient-data failure cases.
 - [x] 4.3 Add PCAP-based integration tests that verify expected JA4, JA4H (`HTTP/1.x` and `h2c`), and JA4T outputs plus resilience to malformed traffic.
 - [x] 4.4 Add CLI behavior checks that verify explicit non-zero failures, foreground `daemon` lifecycle behavior, and clean shutdown handling.
+
+## 5. Daemon YAML Configuration And File Output
+
+- [x] 5.1 Add a YAML-backed daemon configuration model that loads the listen interface plus source and destination exclusion entries from `--config`.
+- [x] 5.2 Implement IP and CIDR exclusion matching for decoded live traffic so matching source or destination addresses are skipped without being counted as failures.
+- [x] 5.3 Change daemon output to default to `./logs/` and append runtime records to a file whose name begins with the current `yyyyMMdd` date.
+- [x] 5.4 Add unit and CLI tests that verify valid and invalid YAML configuration handling, exclusion filtering behavior, log directory creation, and dated log file output.

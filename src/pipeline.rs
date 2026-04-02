@@ -227,12 +227,9 @@ mod tests {
     use super::{FlowKey, Pipeline, PipelineRuntime, SessionTracker, TransportProtocol};
 
     fn tcp_record(payload: &[u8]) -> PacketRecord {
-        let builder = PacketBuilder::ethernet2(
-            [1, 2, 3, 4, 5, 6],
-            [7, 8, 9, 10, 11, 12],
-        )
-        .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
-        .tcp(42424, 443, 1, 4096);
+        let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+            .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
+            .tcp(42424, 443, 1, 4096);
 
         let mut packet = Vec::with_capacity(builder.size(payload.len()));
         builder
@@ -293,8 +290,14 @@ mod tests {
         tracker.observe(&first);
         tracker.observe(&second);
 
-        assert!(tracker.flow(&first.flow_key).is_none(), "oldest flow should be evicted");
-        assert!(tracker.flow(&second.flow_key).is_some(), "newest flow should be retained");
+        assert!(
+            tracker.flow(&first.flow_key).is_none(),
+            "oldest flow should be evicted"
+        );
+        assert!(
+            tracker.flow(&second.flow_key).is_some(),
+            "newest flow should be retained"
+        );
     }
 
     #[test]

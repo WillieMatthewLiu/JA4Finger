@@ -9,11 +9,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Capture live traffic from a Linux interface
+    /// Capture live traffic from a Linux interface using YAML config
     Daemon {
-        /// Linux interface name to capture from
+        /// Path to daemon YAML config file
         #[arg(long)]
-        iface: String,
+        config: String,
     },
     /// Analyze packets from a pcap file
     Pcap {

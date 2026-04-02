@@ -4,12 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 clap = { version = "4.5.38", features = ["derive"] }
 etherparse = "0.19.0"
 hpack = "0.3.0"
 httparse = "1.10.1"
+ipnet = "2.11.0"
 pcap-file = "3.0.0-rc1"
 pnet_datalink = "0.35.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 signal-hook = "0.3.18"
 tls-parser = "0.12.2"

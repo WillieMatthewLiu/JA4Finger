@@ -1,7 +1,71 @@
 use crate::capture::PacketRecord;
 use crate::fingerprint::FingerprintKind;
 use crate::pipeline::{DecodedPacket, RuntimeCounters};
+use chrono::Local;
+use std::fs::{File, OpenOptions, create_dir_all};
+use std::io::Write;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+
+const TEST_ONLY_DAEMON_DATE_PREFIX_ENV: &str = "JA4FINGER_TEST_ONLY_DAEMON_DATE_PREFIX";
+#[derive(Debug)]
+pub struct DaemonFileOutput {
+    path: PathBuf,
+    file: File,
+}
+
+impl DaemonFileOutput {
+    pub fn open(log_dir: impl AsRef<Path>, log_file: &str) -> Result<Self, String> {
+        if log_file.trim().is_empty() {
+            return Err("daemon log file cannot be empty".to_string());
+        }
+
+        let dir = log_dir.as_ref();
+        create_dir_all(dir).map_err(|err| {
+            format!(
+                "failed to create daemon log directory {}: {err}",
+                dir.display()
+            )
+        })?;
+
+        let path = compose_dated_log_path(dir, log_file);
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|err| format!("failed to open daemon log file {}: {err}", path.display()))?;
+
+        Ok(Self { path, file })
+    }
+
+    pub fn write_line(&mut self, line: &str) -> Result<(), String> {
+        writeln!(self.file, "{line}")
+            .and_then(|_| self.file.flush())
+            .map_err(|err| format!("failed to write daemon log line: {err}"))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn compose_dated_log_path(log_dir: &Path, log_file: &str) -> PathBuf {
+    log_dir.join(format!("{}-{log_file}", daemon_date_prefix()))
+}
+
+fn valid_date_prefix(value: &str) -> bool {
+    value.len() == 8 && value.chars().all(|ch| ch.is_ascii_digit())
+}
+
+pub fn daemon_date_prefix() -> String {
+    if let Ok(value) = std::env::var(TEST_ONLY_DAEMON_DATE_PREFIX_ENV) {
+        if valid_date_prefix(&value) {
+            return value;
+        }
+    }
+
+    Local::now().format("%Y%m%d").to_string()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -105,11 +169,14 @@ pub fn init_logging() {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use crate::capture::PacketRecord;
     use crate::fingerprint::FingerprintKind;
     use crate::pipeline::{DecodedPacket, FlowKey, RuntimeCounters, TransportProtocol};
 
-    use super::{FingerprintEmission, RuntimeMode, SummaryReport};
+    use super::{DaemonFileOutput, FingerprintEmission, RuntimeMode, SummaryReport};
 
     #[test]
     fn fingerprint_emission_renders_required_fields() {
@@ -254,5 +321,51 @@ mod tests {
 
         assert_eq!(emission.src_endpoint, "[2001:db8::10]:12345");
         assert_eq!(emission.dst_endpoint, "[2001:db8::20]:443");
+    }
+
+    #[test]
+    fn daemon_file_output_writes_to_dated_log_file_under_target_directory() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_micros();
+        let log_dir = std::env::temp_dir().join(format!("ja4finger-daemon-log-{unique}"));
+        unsafe {
+            std::env::set_var("JA4FINGER_TEST_ONLY_DAEMON_DATE_PREFIX", "20260402");
+        }
+
+        let mut output = DaemonFileOutput::open(&log_dir, "ja4finger.log")
+            .expect("daemon file output should open");
+        output
+            .write_line("mode=daemon status=ready iface=eth0")
+            .expect("ready line should write");
+        output
+            .write_line("mode=daemon status=stopped iface=eth0 reason=shutdown")
+            .expect("stopped line should write");
+
+        assert!(
+            output
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("20260402-")),
+            "daemon log filename should begin with yyyyMMdd prefix"
+        );
+
+        let content = fs::read_to_string(output.path()).expect("log file should be readable");
+        assert!(
+            content.contains("status=ready"),
+            "ready line should be persisted: {content}"
+        );
+        assert!(
+            content.contains("status=stopped"),
+            "stopped line should be persisted: {content}"
+        );
+
+        unsafe {
+            std::env::remove_var("JA4FINGER_TEST_ONLY_DAEMON_DATE_PREFIX");
+        }
+        let _ = fs::remove_file(output.path());
+        let _ = fs::remove_dir_all(log_dir);
     }
 }

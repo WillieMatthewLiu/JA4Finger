@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use etherparse::{PacketBuilder, TcpOptionElement};
@@ -23,6 +22,37 @@ fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
     cmd.output().expect("failed to run ja4finger with env")
 }
 
+fn run_with_env_and_current_dir(
+    args: &[&str],
+    envs: &[(&str, &str)],
+    current_dir: &Path,
+) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ja4finger"));
+    cmd.args(args).current_dir(current_dir);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    cmd.output()
+        .expect("failed to run ja4finger with env/current_dir")
+}
+
+fn spawn_with_env_and_current_dir(
+    args: &[&str],
+    envs: &[(&str, &str)],
+    current_dir: &Path,
+) -> std::process::Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ja4finger"));
+    cmd.args(args)
+        .current_dir(current_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    cmd.spawn()
+        .expect("failed to spawn ja4finger with env/current_dir")
+}
+
 fn unique_temp_pcap_path(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -33,6 +63,56 @@ fn unique_temp_pcap_path(tag: &str) -> PathBuf {
         "ja4finger-{tag}-{}-{nanos}.pcap",
         std::process::id()
     ))
+}
+
+fn unique_temp_dir(tag: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("ja4finger-{tag}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp directory should be creatable");
+    dir
+}
+
+fn write_daemon_yaml_config(current_dir: &Path, yaml: &str) -> PathBuf {
+    let config_path = current_dir.join("daemon-config.yaml");
+    std::fs::write(&config_path, yaml).expect("yaml config should be writable");
+    config_path
+}
+
+fn default_daemon_yaml(iface: &str) -> String {
+    format!("daemon:\n  iface: {iface}\n  src_excludes: []\n  dst_excludes: []\n")
+}
+
+fn today_yyyymmdd() -> String {
+    let output = Command::new("date")
+        .arg("+%Y%m%d")
+        .output()
+        .expect("date command should be available");
+    assert!(
+        output.status.success(),
+        "date command should succeed: {:?}",
+        output.status
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn read_single_log_file(logs_dir: &Path) -> (PathBuf, String) {
+    let mut log_files = std::fs::read_dir(logs_dir)
+        .expect("logs directory should be readable")
+        .map(|entry| entry.expect("log dir entry should be readable").path())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+
+    log_files.sort();
+    let log_file = log_files
+        .pop()
+        .expect("logs directory should contain at least one file");
+
+    let content =
+        std::fs::read_to_string(&log_file).expect("log file should be readable as UTF-8 text");
+    (log_file, content)
 }
 
 fn write_pcap(path: &Path, frames: &[Vec<u8>]) {
@@ -196,18 +276,18 @@ fn undecodable_client_payload_frame() -> Vec<u8> {
 }
 
 #[test]
-fn daemon_requires_interface_argument() {
+fn daemon_requires_config_argument() {
     let output = run(&["daemon"]);
 
     assert!(
         !output.status.success(),
-        "daemon without --iface should fail"
+        "daemon without --config should fail"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--iface"),
-        "stderr should mention missing --iface, got: {stderr}"
+        stderr.contains("--config"),
+        "stderr should mention missing --config, got: {stderr}"
     );
 }
 
@@ -258,72 +338,118 @@ fn pcap_returns_non_zero_for_missing_file() {
 }
 
 #[test]
-fn daemon_returns_non_zero_for_missing_interface() {
-    let output = run(&["daemon", "--iface", "definitely-not-a-real-iface"]);
+fn daemon_returns_non_zero_for_missing_yaml_config_file() {
+    let output = run(&["daemon", "--config", "fixtures/does-not-exist.yaml"]);
 
     assert!(
         !output.status.success(),
-        "daemon should fail for a missing interface"
+        "daemon should fail for a missing yaml config file"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("definitely-not-a-real-iface"),
-        "stderr should mention the missing interface, got: {stderr}"
+        stderr.contains("does-not-exist.yaml"),
+        "stderr should mention the missing config file, got: {stderr}"
     );
 }
 
 #[test]
-fn daemon_foreground_lifecycle_exits_cleanly_on_shutdown_request() {
-    let output = run_with_env(
-        &["daemon", "--iface", "test-only-iface"],
+fn daemon_returns_non_zero_for_malformed_yaml_config() {
+    let workdir = unique_temp_dir("daemon-invalid-yaml");
+    let config_path = write_daemon_yaml_config(
+        &workdir,
+        "daemon:\n  iface: test-only-iface\n  src_excludes: [not-closed\n",
+    );
+    let config_arg = config_path.to_string_lossy().to_string();
+
+    let output = run_with_env_and_current_dir(&["daemon", "--config", &config_arg], &[], &workdir);
+
+    let _ = std::fs::remove_dir_all(&workdir);
+
+    assert!(
+        !output.status.success(),
+        "daemon should fail for malformed yaml config"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("yaml")
+            || stderr.to_lowercase().contains("config")
+            || stderr.to_lowercase().contains("parse"),
+        "stderr should mention config parse failure: {stderr}"
+    );
+}
+
+#[test]
+fn daemon_with_valid_yaml_config_writes_default_dated_log_with_lifecycle_records() {
+    let workdir = unique_temp_dir("daemon-valid-config-logs");
+    let config_path = write_daemon_yaml_config(&workdir, &default_daemon_yaml("test-only-iface"));
+    let config_arg = config_path.to_string_lossy().to_string();
+
+    let output = run_with_env_and_current_dir(
+        &["daemon", "--config", &config_arg],
         &[
             ("JA4FINGER_TEST_ONLY_DAEMON_SKIP_CAPTURE_OPEN", "1"),
             ("JA4FINGER_TEST_ONLY_DAEMON_REQUEST_SHUTDOWN", "1"),
         ],
+        &workdir,
     );
+
+    let logs_dir = workdir.join("logs");
+    assert!(logs_dir.is_dir(), "daemon should create ./logs by default");
+    let (log_file, log_content) = read_single_log_file(&logs_dir);
+    let log_filename = log_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("log file name should be valid UTF-8");
+    let date_prefix = today_yyyymmdd();
+    assert!(
+        log_filename.starts_with(&date_prefix),
+        "default log file should start with yyyyMMdd={date_prefix}, got: {log_filename}"
+    );
+
+    let _ = std::fs::remove_dir_all(&workdir);
 
     assert!(
         output.status.success(),
-        "daemon should exit cleanly when shutdown is requested in foreground lifecycle"
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("mode=daemon status=ready iface=test-only-iface"),
-        "daemon should report ready status before waiting: {stdout}"
+        "daemon should exit cleanly when shutdown is requested in foreground lifecycle with valid yaml config"
     );
     assert!(
-        stdout.contains("mode=daemon status=stopped iface=test-only-iface reason=shutdown"),
-        "daemon should report clean shutdown: {stdout}"
+        log_content.contains("mode=daemon status=ready"),
+        "daemon log should include ready lifecycle record: {log_content}"
     );
     assert!(
-        stdout.contains("mode=daemon"),
-        "daemon should emit final summary mode line: {stdout}"
+        log_content.contains("mode=daemon status=stopped"),
+        "daemon log should include stopped lifecycle record: {log_content}"
     );
     assert!(
-        stdout.contains("packets_seen=0"),
-        "daemon summary should include packets_seen=0 in controlled shutdown test: {stdout}"
+        log_content.contains("mode=daemon"),
+        "daemon log should include daemon summary mode line: {log_content}"
     );
     assert!(
-        stdout.contains("parse_failures=0"),
-        "daemon summary should include parse_failures=0 in controlled shutdown test: {stdout}"
+        log_content.contains("packets_seen=0"),
+        "daemon summary should include packets_seen=0 in controlled shutdown test: {log_content}"
     );
     assert!(
-        stdout.contains("extraction_failures=0"),
-        "daemon summary should include extraction_failures=0 in controlled shutdown test: {stdout}"
+        log_content.contains("parse_failures=0"),
+        "daemon summary should include parse_failures=0 in controlled shutdown test: {log_content}"
+    );
+    assert!(
+        log_content.contains("extraction_failures=0"),
+        "daemon summary should include extraction_failures=0 in controlled shutdown test: {log_content}"
     );
 }
 
 #[test]
 fn daemon_handles_sigterm_with_clean_shutdown_and_summary() {
-    let child = Command::new(env!("CARGO_BIN_EXE_ja4finger"))
-        .args(["daemon", "--iface", "test-only-iface"])
-        .env("JA4FINGER_TEST_ONLY_DAEMON_SKIP_CAPTURE_OPEN", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn daemon process");
+    let workdir = unique_temp_dir("daemon-sigterm");
+    let config_path = write_daemon_yaml_config(&workdir, &default_daemon_yaml("test-only-iface"));
+    let config_arg = config_path.to_string_lossy().to_string();
+
+    let child = spawn_with_env_and_current_dir(
+        &["daemon", "--config", &config_arg],
+        &[("JA4FINGER_TEST_ONLY_DAEMON_SKIP_CAPTURE_OPEN", "1")],
+        &workdir,
+    );
 
     std::thread::sleep(Duration::from_millis(150));
     let pid = child.id().to_string();
@@ -340,35 +466,42 @@ fn daemon_handles_sigterm_with_clean_shutdown_and_summary() {
         .wait_with_output()
         .expect("failed to wait for daemon process output");
 
+    let logs_dir = workdir.join("logs");
+    assert!(
+        logs_dir.is_dir(),
+        "daemon should create ./logs directory in configured current_dir"
+    );
+    let (_, log_content) = read_single_log_file(&logs_dir);
+
+    let _ = std::fs::remove_dir_all(&workdir);
+
     assert!(
         output.status.success(),
         "daemon should handle SIGTERM as a clean shutdown"
     );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("mode=daemon status=ready iface=test-only-iface"),
-        "daemon should report ready status before signal shutdown: {stdout}"
+        log_content.contains("mode=daemon status=ready"),
+        "daemon log should report ready status before signal shutdown: {log_content}"
     );
     assert!(
-        stdout.contains("mode=daemon status=stopped iface=test-only-iface reason=shutdown"),
-        "daemon should report signal-driven shutdown reason: {stdout}"
+        log_content.contains("mode=daemon status=stopped"),
+        "daemon log should report signal-driven shutdown reason: {log_content}"
     );
     assert!(
-        stdout.contains("mode=daemon"),
-        "daemon should emit final summary after signal shutdown: {stdout}"
+        log_content.contains("mode=daemon"),
+        "daemon log should emit final summary after signal shutdown: {log_content}"
     );
     assert!(
-        stdout.contains("packets_seen=0"),
-        "daemon summary should include packets_seen=0 in signal shutdown test: {stdout}"
+        log_content.contains("packets_seen=0"),
+        "daemon summary should include packets_seen=0 in signal shutdown test: {log_content}"
     );
     assert!(
-        stdout.contains("parse_failures=0"),
-        "daemon summary should include parse_failures=0 in signal shutdown test: {stdout}"
+        log_content.contains("parse_failures=0"),
+        "daemon summary should include parse_failures=0 in signal shutdown test: {log_content}"
     );
     assert!(
-        stdout.contains("extraction_failures=0"),
-        "daemon summary should include extraction_failures=0 in signal shutdown test: {stdout}"
+        log_content.contains("extraction_failures=0"),
+        "daemon summary should include extraction_failures=0 in signal shutdown test: {log_content}"
     );
 }
 
