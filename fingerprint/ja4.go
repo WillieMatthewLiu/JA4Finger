@@ -15,6 +15,8 @@ var ErrUnsupportedFingerprint = errors.New("fingerprint: unsupported decoded tra
 type Result struct {
 	SrcIP           string `json:"src_ip"`
 	SrcPort         uint16 `json:"src_port"`
+	DstIP           string `json:"dst_ip"`
+	DstPort         uint16 `json:"dst_port"`
 	Protocol        string `json:"protocol"`
 	FingerprintType string `json:"fingerprint_type"`
 	Fingerprint     string `json:"fingerprint"`
@@ -79,6 +81,8 @@ func (JA4Fingerprinter) Fingerprint(hello *decoder.ClientHello) (*Result, error)
 	return &Result{
 		SrcIP:           hello.SrcIP,
 		SrcPort:         hello.SrcPort,
+		DstIP:           hello.DstIP,
+		DstPort:         hello.DstPort,
 		Protocol:        hello.Protocol,
 		FingerprintType: "ja4",
 		Fingerprint:     fingerprint,

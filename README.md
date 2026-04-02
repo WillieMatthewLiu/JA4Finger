@@ -32,6 +32,8 @@ Output is JSON lines on stdout with these fields:
 
 - `src_ip`
 - `src_port`
+- `dst_ip`
+- `dst_port`
 - `protocol`
 - `fingerprint_type`
 - `fingerprint`

@@ -27,6 +27,8 @@ const (
 type ClientHello struct {
 	SrcIP               string
 	SrcPort             uint16
+	DstIP               string
+	DstPort             uint16
 	Protocol            string
 	LegacyVersion       uint16
 	SupportedVersions   []uint16
@@ -38,7 +40,7 @@ type ClientHello struct {
 }
 
 func DecodeTLSClientHello(evt capture.PacketEvent) (*ClientHello, error) {
-	srcIP, srcPort, payload, err := extractNetworkData(evt)
+	srcIP, srcPort, dstIP, dstPort, payload, err := extractNetworkData(evt)
 	if err != nil {
 		return nil, err
 	}
@@ -49,34 +51,36 @@ func DecodeTLSClientHello(evt capture.PacketEvent) (*ClientHello, error) {
 	}
 	hello.SrcIP = srcIP
 	hello.SrcPort = srcPort
+	hello.DstIP = dstIP
+	hello.DstPort = dstPort
 	hello.Protocol = "tls"
 	return hello, nil
 }
 
-func extractNetworkData(evt capture.PacketEvent) (string, uint16, []byte, error) {
+func extractNetworkData(evt capture.PacketEvent) (string, uint16, string, uint16, []byte, error) {
 	packet := evt.Packet
 	if packet == nil {
-		return "", 0, nil, ErrNotCandidate
+		return "", 0, "", 0, nil, ErrNotCandidate
 	}
 
 	tcpLayer := packet.Layer(layers.LayerTypeTCP)
 	if tcpLayer == nil {
-		return "", 0, nil, ErrNotCandidate
+		return "", 0, "", 0, nil, ErrNotCandidate
 	}
 	tcp, ok := tcpLayer.(*layers.TCP)
 	if !ok || len(tcp.Payload) == 0 {
-		return "", 0, nil, ErrNotCandidate
+		return "", 0, "", 0, nil, ErrNotCandidate
 	}
 
 	switch {
 	case packet.Layer(layers.LayerTypeIPv4) != nil:
 		ip := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-		return ip.SrcIP.String(), uint16(tcp.SrcPort), tcp.Payload, nil
+		return ip.SrcIP.String(), uint16(tcp.SrcPort), ip.DstIP.String(), uint16(tcp.DstPort), tcp.Payload, nil
 	case packet.Layer(layers.LayerTypeIPv6) != nil:
 		ip := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-		return ip.SrcIP.String(), uint16(tcp.SrcPort), tcp.Payload, nil
+		return ip.SrcIP.String(), uint16(tcp.SrcPort), ip.DstIP.String(), uint16(tcp.DstPort), tcp.Payload, nil
 	default:
-		return "", 0, nil, ErrNotCandidate
+		return "", 0, "", 0, nil, ErrNotCandidate
 	}
 }
 

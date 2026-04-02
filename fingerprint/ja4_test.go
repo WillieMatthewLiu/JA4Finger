@@ -10,6 +10,8 @@ func TestJA4FingerprinterBuildsExpectedFingerprint(t *testing.T) {
 	hello := &decoder.ClientHello{
 		SrcIP:               "192.168.0.10",
 		SrcPort:             54321,
+		DstIP:               "192.168.0.20",
+		DstPort:             443,
 		Protocol:            "tls",
 		LegacyVersion:       0x0303,
 		SupportedVersions:   []uint16{0x7a7a, 0x0304, 0x0303},
@@ -31,6 +33,12 @@ func TestJA4FingerprinterBuildsExpectedFingerprint(t *testing.T) {
 	}
 	if result.FingerprintType != "ja4" {
 		t.Fatalf("unexpected fingerprint type: %s", result.FingerprintType)
+	}
+	if result.DstIP != "192.168.0.20" {
+		t.Fatalf("unexpected destination IP: %s", result.DstIP)
+	}
+	if result.DstPort != 443 {
+		t.Fatalf("unexpected destination port: %d", result.DstPort)
 	}
 	if result.CipherHashInput != "1301,1302,c02f" {
 		t.Fatalf("unexpected cipher hash input: %s", result.CipherHashInput)

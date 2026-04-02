@@ -192,6 +192,12 @@ func TestRunPCAPEmitsStableJA4Record(t *testing.T) {
 	}
 
 	out := stdout.String()
+	if !strings.Contains(out, "\"dst_ip\":\"192.168.0.20\"") {
+		t.Fatalf("expected destination IP in output, got %q", out)
+	}
+	if !strings.Contains(out, "\"dst_port\":443") {
+		t.Fatalf("expected destination port in output, got %q", out)
+	}
 	if !strings.Contains(out, "\"fingerprint_type\":\"ja4\"") {
 		t.Fatalf("expected JA4 output, got %q", out)
 	}
@@ -215,6 +221,12 @@ func TestRunPCAPDebugHashInputsEmitsHashInputs(t *testing.T) {
 	}
 
 	out := stdout.String()
+	if !strings.Contains(out, "\"dst_ip\":\"192.168.0.20\"") {
+		t.Fatalf("expected destination IP in debug output, got %q", out)
+	}
+	if !strings.Contains(out, "\"dst_port\":443") {
+		t.Fatalf("expected destination port in debug output, got %q", out)
+	}
 	if !strings.Contains(out, "\"cipher_hash_input\":\"1301,1302,c02f\"") {
 		t.Fatalf("expected cipher hash input in debug output, got %q", out)
 	}

@@ -24,6 +24,12 @@ func TestDecodeTLSClientHelloParsesExpectedFields(t *testing.T) {
 	if hello.SrcPort != 54321 {
 		t.Fatalf("unexpected source port: %d", hello.SrcPort)
 	}
+	if hello.DstIP != "192.168.0.20" {
+		t.Fatalf("unexpected destination IP: %s", hello.DstIP)
+	}
+	if hello.DstPort != 443 {
+		t.Fatalf("unexpected destination port: %d", hello.DstPort)
+	}
 	if hello.Protocol != "tls" {
 		t.Fatalf("unexpected protocol: %s", hello.Protocol)
 	}
@@ -116,7 +122,7 @@ func testClientHelloRecord() []byte {
 	}
 	body = append(body, make([]byte, 32)...) // random
 	body = append(body, 0x00)                // session id len
-	body = append(body, 0x00, 0x08, // cipher suites len
+	body = append(body, 0x00, 0x08,          // cipher suites len
 		0x13, 0x01,
 		0x13, 0x02,
 		0x0a, 0x0a,
