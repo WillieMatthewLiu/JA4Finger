@@ -22,6 +22,12 @@ Analyze a PCAP file and include the normalized JA4 pre-hash input strings for de
 go run ./cmd/ja4finger pcap --debug-hash-inputs --file ./capture.pcap
 ```
 
+Analyze a PCAP file, keep JSONL on stdout, and also append the same results to a custom log file:
+
+```bash
+go run ./cmd/ja4finger pcap --file ./capture.pcap --log-file ./logs/custom-ja4.log
+```
+
 Monitor a live interface on Linux:
 
 ```bash
@@ -37,6 +43,13 @@ Output is JSON lines on stdout with these fields:
 - `protocol`
 - `fingerprint_type`
 - `fingerprint`
+
+By default, the same JSON lines are also appended to a log file in the current directory:
+
+- `pcap`: `logs/yyyyMMdd-ja4finger-pcap.log`
+- `live`: `logs/yyyyMMdd-ja4finger-live.log`
+
+Use `--log-file <path>` to override the default log file location.
 
 When `--debug-hash-inputs` is enabled, each JSON object also includes:
 

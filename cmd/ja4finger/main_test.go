@@ -17,7 +17,7 @@ import (
 	"github.com/google/gopacket/pcapgo"
 )
 
-func withStubRunners(t *testing.T, live func(context.Context, string, io.Writer, io.Writer, bool) error, pcap func(context.Context, string, io.Writer, io.Writer, bool) error) {
+func withStubRunners(t *testing.T, live func(context.Context, string, io.Writer, io.Writer, bool, string) error, pcap func(context.Context, string, io.Writer, io.Writer, bool, string) error) {
 	t.Helper()
 
 	originalLive := runLiveMode
@@ -49,11 +49,11 @@ func TestRunLiveRequiresInterface(t *testing.T) {
 func TestRunLiveAcceptsInterface(t *testing.T) {
 	var called string
 	withStubRunners(t,
-		func(_ context.Context, iface string, _, _ io.Writer, _ bool) error {
+		func(_ context.Context, iface string, _, _ io.Writer, _ bool, _ string) error {
 			called = iface
 			return nil
 		},
-		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
 	)
 	if err := run([]string{"live", "--interface", "eth0"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -65,8 +65,8 @@ func TestRunLiveAcceptsInterface(t *testing.T) {
 
 func TestRunLiveShortFlag(t *testing.T) {
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
-		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
 	)
 	if err := run([]string{"live", "-i", "eth0"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -86,8 +86,8 @@ func TestRunPCAPRequiresFile(t *testing.T) {
 func TestRunPCAPAcceptsFile(t *testing.T) {
 	var called string
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
-		func(_ context.Context, file string, _, _ io.Writer, _ bool) error {
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(_ context.Context, file string, _, _ io.Writer, _ bool, _ string) error {
 			called = file
 			return nil
 		},
@@ -102,8 +102,8 @@ func TestRunPCAPAcceptsFile(t *testing.T) {
 
 func TestRunPCAPShortFlag(t *testing.T) {
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
-		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
 	)
 	if err := run([]string{"pcap", "-f", "capture.pcap"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -153,8 +153,8 @@ func TestRunUnknownSubcommand(t *testing.T) {
 func TestRunPropagatesExecutorError(t *testing.T) {
 	expected := errors.New("boom")
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool) error { return expected },
-		func(context.Context, string, io.Writer, io.Writer, bool) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return expected },
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
 	)
 
 	err := run([]string{"live", "--interface", "eth0"})
@@ -183,7 +183,47 @@ func TestRunLiveReturnsStartupErrorForInvalidInterface(t *testing.T) {
 	}
 }
 
+func TestRunPCAPUsesDefaultLogFile(t *testing.T) {
+	var logFile string
+	withStubRunners(t,
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(_ context.Context, _ string, _, _ io.Writer, _ bool, path string) error {
+			logFile = path
+			return nil
+		},
+	)
+
+	if err := run([]string{"pcap", "--file", "capture.pcap"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := defaultLogFilePath("pcap", time.Now())
+	if logFile != expected {
+		t.Fatalf("unexpected default log file: %s", logFile)
+	}
+}
+
+func TestRunPCAPAcceptsCustomLogFile(t *testing.T) {
+	var logFile string
+	withStubRunners(t,
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(_ context.Context, _ string, _, _ io.Writer, _ bool, path string) error {
+			logFile = path
+			return nil
+		},
+	)
+
+	if err := run([]string{"pcap", "--file", "capture.pcap", "--log-file", "custom.log"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if logFile != "custom.log" {
+		t.Fatalf("unexpected custom log file: %s", logFile)
+	}
+}
+
 func TestRunPCAPEmitsStableJA4Record(t *testing.T) {
+	withWorkingDir(t, t.TempDir())
 	path := writePCAPFixture(t, fullTLSClientHello())
 	var stdout, stderr bytes.Buffer
 
@@ -210,9 +250,19 @@ func TestRunPCAPEmitsStableJA4Record(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Fatalf("did not expect stderr output: %q", stderr.String())
 	}
+
+	logPath := defaultLogFilePath("pcap", time.Now())
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", logPath, err)
+	}
+	if string(logData) != out {
+		t.Fatalf("expected default log file to match stdout, got %q", string(logData))
+	}
 }
 
 func TestRunPCAPDebugHashInputsEmitsHashInputs(t *testing.T) {
+	withWorkingDir(t, t.TempDir())
 	path := writePCAPFixture(t, fullTLSClientHello())
 	var stdout, stderr bytes.Buffer
 
@@ -238,7 +288,30 @@ func TestRunPCAPDebugHashInputsEmitsHashInputs(t *testing.T) {
 	}
 }
 
+func TestRunPCAPWritesToCustomLogFile(t *testing.T) {
+	withWorkingDir(t, t.TempDir())
+	path := writePCAPFixture(t, fullTLSClientHello())
+	logPath := filepath.Join("nested", "ja4-results.log")
+	var stdout, stderr bytes.Buffer
+
+	if err := runWithContext(context.Background(), []string{"pcap", "--file", path, "--log-file", logPath}, &stdout, &stderr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", logPath, err)
+	}
+	if string(logData) != stdout.String() {
+		t.Fatalf("expected custom log file to match stdout, got %q", string(logData))
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("did not expect stderr output: %q", stderr.String())
+	}
+}
+
 func TestRunPCAPReportsIncompleteTLSHandshakeToStderr(t *testing.T) {
+	withWorkingDir(t, t.TempDir())
 	path := writePCAPFixture(t, fullTLSClientHello()[:len(fullTLSClientHello())-1])
 	var stdout, stderr bytes.Buffer
 
@@ -252,6 +325,23 @@ func TestRunPCAPReportsIncompleteTLSHandshakeToStderr(t *testing.T) {
 	if !strings.Contains(stderr.String(), "incomplete TLS client hello") {
 		t.Fatalf("expected incomplete handshake on stderr, got %q", stderr.String())
 	}
+}
+
+func withWorkingDir(t *testing.T, dir string) {
+	t.Helper()
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir(%q): %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	})
 }
 
 func writePCAPFixture(t *testing.T, payload []byte) string {

@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/nextinfra/ja4finger/engine"
 )
@@ -44,13 +46,13 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 		if err != nil {
 			return err
 		}
-		return runLiveMode(ctx, parsed.value, stdout, stderr, parsed.debugHashInputs)
+		return runLiveMode(ctx, parsed.value, stdout, stderr, parsed.debugHashInputs, parsed.logFile)
 	case "pcap":
 		parsed, err := parseCommandFlags("pcap", args[1:], "file", "f", "path to the PCAP file to analyze")
 		if err != nil {
 			return err
 		}
-		return runPCAPMode(ctx, parsed.value, stdout, stderr, parsed.debugHashInputs)
+		return runPCAPMode(ctx, parsed.value, stdout, stderr, parsed.debugHashInputs, parsed.logFile)
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
@@ -59,6 +61,7 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 type commandFlags struct {
 	value           string
 	debugHashInputs bool
+	logFile         string
 }
 
 func parseCommandFlags(subcommand string, args []string, longName, shortName, description string) (*commandFlags, error) {
@@ -66,6 +69,7 @@ func parseCommandFlags(subcommand string, args []string, longName, shortName, de
 	longVal := fs.String(longName, "", description)
 	shortVal := fs.String(shortName, "", fmt.Sprintf("short alias for --%s", longName))
 	debugHashInputs := fs.Bool("debug-hash-inputs", false, "include JA4 pre-hash input strings in output")
+	logFile := fs.String("log-file", "", "append JSONL results to this file; defaults to logs/yyyyMMdd-ja4finger-<mode>.log")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -79,8 +83,17 @@ func parseCommandFlags(subcommand string, args []string, longName, shortName, de
 	if value == "" {
 		return nil, fmt.Errorf("%s subcommand requires --%s", subcommand, longName)
 	}
+	resolvedLogFile := strings.TrimSpace(*logFile)
+	if resolvedLogFile == "" {
+		resolvedLogFile = defaultLogFilePath(subcommand, time.Now())
+	}
 	return &commandFlags{
 		value:           value,
 		debugHashInputs: *debugHashInputs,
+		logFile:         resolvedLogFile,
 	}, nil
+}
+
+func defaultLogFilePath(subcommand string, now time.Time) string {
+	return filepath.Join("logs", now.Format("20060102")+"-ja4finger-"+subcommand+".log")
 }
