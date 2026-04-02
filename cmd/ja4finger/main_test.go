@@ -63,6 +63,44 @@ func TestRunLiveAcceptsInterface(t *testing.T) {
 	}
 }
 
+func TestRunLiveAcceptsConfigFile(t *testing.T) {
+	configPath := writeLiveConfig(t, "live:\n  interface: eth1\n")
+	var called string
+	withStubRunners(t,
+		func(_ context.Context, iface string, _, _ io.Writer, _ bool, _ string) error {
+			called = iface
+			return nil
+		},
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+	)
+
+	if err := run([]string{"live", "--config", configPath}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called != "eth1" {
+		t.Fatalf("unexpected interface from config: %s", called)
+	}
+}
+
+func TestRunLiveInterfaceOverridesConfigFile(t *testing.T) {
+	configPath := writeLiveConfig(t, "live:\n  interface: eth1\n")
+	var called string
+	withStubRunners(t,
+		func(_ context.Context, iface string, _, _ io.Writer, _ bool, _ string) error {
+			called = iface
+			return nil
+		},
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+	)
+
+	if err := run([]string{"live", "--interface", "eth0", "--config", configPath}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called != "eth0" {
+		t.Fatalf("expected CLI interface to override config, got %s", called)
+	}
+}
+
 func TestRunLiveShortFlag(t *testing.T) {
 	withStubRunners(t,
 		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
@@ -136,6 +174,30 @@ func TestRunLiveRejectsBlankInterface(t *testing.T) {
 		t.Fatal("expected error when live interface flag is blank")
 	}
 	if !strings.Contains(err.Error(), "interface") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunLiveRejectsConfigWithoutInterface(t *testing.T) {
+	configPath := writeLiveConfig(t, "live:\n  device: eth1\n")
+
+	err := run([]string{"live", "--config", configPath})
+	if err == nil {
+		t.Fatal("expected error when live config is missing interface")
+	}
+	if !strings.Contains(err.Error(), "live.interface") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunLiveRejectsInvalidConfig(t *testing.T) {
+	configPath := writeLiveConfig(t, "interface: [\n")
+
+	err := run([]string{"live", "--config", configPath})
+	if err == nil {
+		t.Fatal("expected error when live config is invalid")
+	}
+	if !strings.Contains(err.Error(), "config") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -342,6 +404,16 @@ func withWorkingDir(t *testing.T, dir string) {
 			t.Fatalf("restore working directory: %v", err)
 		}
 	})
+}
+
+func writeLiveConfig(t *testing.T, contents string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "ja4finger.yaml")
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+	return path
 }
 
 func writePCAPFixture(t *testing.T, payload []byte) string {

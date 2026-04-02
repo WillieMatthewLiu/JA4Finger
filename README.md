@@ -34,6 +34,19 @@ Monitor a live interface on Linux:
 sudo go run ./cmd/ja4finger live --interface eth0
 ```
 
+Monitor a live interface on Linux using a YAML config file:
+
+```bash
+sudo go run ./cmd/ja4finger live --config ./ja4finger.yaml
+```
+
+Example config:
+
+```yaml
+live:
+  interface: eth0
+```
+
 Output is JSON lines on stdout with these fields:
 
 - `src_ip`
@@ -65,6 +78,7 @@ These two fields are the normalized raw strings used as JA4 hash inputs, not the
 
 - `pcap` and `live` share the same decode, fingerprint, and output pipeline.
 - `--debug-hash-inputs` is available on both `pcap` and `live`.
+- In `live` mode, `--interface` takes precedence over `--config`; if `--interface` is omitted, the tool reads `live.interface` from the YAML config file.
 - `live` requires Linux `AF_PACKET` support plus privileges to open the requested interface.
 - Non-Linux builds return a startup error for `live` instead of silently pretending support exists.
 - The current implementation only fingerprints TLS ClientHello traffic that is fully present in a single captured TCP payload.
