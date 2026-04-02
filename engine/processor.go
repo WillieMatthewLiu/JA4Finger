@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/nextinfra/ja4finger/capture"
 	"github.com/nextinfra/ja4finger/decoder"
 	"github.com/nextinfra/ja4finger/fingerprint"
@@ -19,21 +21,34 @@ type ResultEmitter interface {
 	Emit(*fingerprint.Result) error
 }
 
+type LiveOptions struct {
+	ExcludeSrcIPs []string
+	ExcludeDstIPs []string
+}
+
 type FingerprintProcessor struct {
 	registry        *fingerprint.Registry
 	emitter         ResultEmitter
 	debugHashInputs bool
+	excludeSrcIPs   map[string]struct{}
+	excludeDstIPs   map[string]struct{}
 }
 
-func NewFingerprintProcessor(emitter ResultEmitter, debugHashInputs bool) *FingerprintProcessor {
+func NewFingerprintProcessor(emitter ResultEmitter, debugHashInputs bool, excludeSrcIPs, excludeDstIPs []string) *FingerprintProcessor {
 	return &FingerprintProcessor{
 		registry:        fingerprint.NewRegistry(fingerprint.JA4Fingerprinter{}),
 		emitter:         emitter,
 		debugHashInputs: debugHashInputs,
+		excludeSrcIPs:   buildIPSet(excludeSrcIPs),
+		excludeDstIPs:   buildIPSet(excludeDstIPs),
 	}
 }
 
 func (p *FingerprintProcessor) ProcessPacket(_ context.Context, evt capture.PacketEvent) error {
+	if p.shouldExcludePacket(evt.Packet) {
+		return nil
+	}
+
 	hello, err := decoder.DecodeTLSClientHello(evt)
 	if err != nil {
 		if errors.Is(err, decoder.ErrNotCandidate) {
@@ -62,18 +77,18 @@ func RunPCAP(ctx context.Context, path string, stdout, stderr io.Writer, debugHa
 	if err != nil {
 		return err
 	}
-	return runSource(ctx, source, stdout, stderr, debugHashInputs, logFile)
+	return runSource(ctx, source, stdout, stderr, debugHashInputs, logFile, nil, nil)
 }
 
-func RunLive(ctx context.Context, iface string, stdout, stderr io.Writer, debugHashInputs bool, logFile string) error {
+func RunLive(ctx context.Context, iface string, stdout, stderr io.Writer, debugHashInputs bool, logFile string, options LiveOptions) error {
 	source, err := capture.NewLiveSource(ctx, iface)
 	if err != nil {
 		return err
 	}
-	return runSource(ctx, source, stdout, stderr, debugHashInputs, logFile)
+	return runSource(ctx, source, stdout, stderr, debugHashInputs, logFile, options.ExcludeSrcIPs, options.ExcludeDstIPs)
 }
 
-func runSource(ctx context.Context, source *capture.Source, stdout, stderr io.Writer, debugHashInputs bool, logFile string) error {
+func runSource(ctx context.Context, source *capture.Source, stdout, stderr io.Writer, debugHashInputs bool, logFile string, excludeSrcIPs, excludeDstIPs []string) error {
 	defer source.Close()
 
 	resultWriter, resultCloser, err := buildResultWriter(stdout, logFile)
@@ -84,7 +99,7 @@ func runSource(ctx context.Context, source *capture.Source, stdout, stderr io.Wr
 		defer resultCloser.Close()
 	}
 
-	processor := NewFingerprintProcessor(output.NewJSONLEmitter(resultWriter), debugHashInputs)
+	processor := NewFingerprintProcessor(output.NewJSONLEmitter(resultWriter), debugHashInputs, excludeSrcIPs, excludeDstIPs)
 	pipeline, err := NewPipeline(ctx, source, processor)
 	if err != nil {
 		return err
@@ -148,5 +163,53 @@ func combineResultWriters(writers []io.Writer) io.Writer {
 		return writers[0]
 	default:
 		return io.MultiWriter(writers...)
+	}
+}
+
+func buildIPSet(values []string) map[string]struct{} {
+	if len(values) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		set[value] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+func (p *FingerprintProcessor) shouldExcludePacket(packet gopacket.Packet) bool {
+	if packet == nil {
+		return false
+	}
+	srcIP, dstIP := packetIPs(packet)
+	if srcIP != "" && p.excludeSrcIPs != nil {
+		if _, blocked := p.excludeSrcIPs[srcIP]; blocked {
+			return true
+		}
+	}
+	if dstIP != "" && p.excludeDstIPs != nil {
+		if _, blocked := p.excludeDstIPs[dstIP]; blocked {
+			return true
+		}
+	}
+	return false
+}
+
+func packetIPs(packet gopacket.Packet) (string, string) {
+	switch {
+	case packet.Layer(layers.LayerTypeIPv4) != nil:
+		ip := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+		return ip.SrcIP.String(), ip.DstIP.String()
+	case packet.Layer(layers.LayerTypeIPv6) != nil:
+		ip := packet.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
+		return ip.SrcIP.String(), ip.DstIP.String()
+	default:
+		return "", ""
 	}
 }

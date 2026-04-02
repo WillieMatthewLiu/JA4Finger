@@ -15,7 +15,7 @@ import (
 
 func TestFingerprintProcessorEmitsJA4Result(t *testing.T) {
 	emitter := &stubEmitter{}
-	processor := NewFingerprintProcessor(emitter, false)
+	processor := NewFingerprintProcessor(emitter, false, nil, nil)
 
 	if err := processor.ProcessPacket(context.Background(), tlsEvent(t, tlsRecord())); err != nil {
 		t.Fatalf("ProcessPacket returned error: %v", err)
@@ -34,7 +34,7 @@ func TestFingerprintProcessorEmitsJA4Result(t *testing.T) {
 
 func TestFingerprintProcessorEmitsDebugHashInputsWhenEnabled(t *testing.T) {
 	emitter := &stubEmitter{}
-	processor := NewFingerprintProcessor(emitter, true)
+	processor := NewFingerprintProcessor(emitter, true, nil, nil)
 
 	if err := processor.ProcessPacket(context.Background(), tlsEvent(t, tlsRecord())); err != nil {
 		t.Fatalf("ProcessPacket returned error: %v", err)
@@ -53,7 +53,7 @@ func TestFingerprintProcessorEmitsDebugHashInputsWhenEnabled(t *testing.T) {
 
 func TestFingerprintProcessorIgnoresUnsupportedTraffic(t *testing.T) {
 	emitter := &stubEmitter{}
-	processor := NewFingerprintProcessor(emitter, false)
+	processor := NewFingerprintProcessor(emitter, false, nil, nil)
 
 	err := processor.ProcessPacket(context.Background(), tlsEvent(t, []byte("plain text")))
 	if err != nil {
@@ -66,11 +66,47 @@ func TestFingerprintProcessorIgnoresUnsupportedTraffic(t *testing.T) {
 
 func TestFingerprintProcessorReturnsDecodeErrors(t *testing.T) {
 	emitter := &stubEmitter{}
-	processor := NewFingerprintProcessor(emitter, false)
+	processor := NewFingerprintProcessor(emitter, false, nil, nil)
 
 	err := processor.ProcessPacket(context.Background(), tlsEvent(t, tlsRecord()[:len(tlsRecord())-1]))
 	if !errors.Is(err, decoder.ErrNeedMoreData) {
 		t.Fatalf("expected ErrNeedMoreData, got %v", err)
+	}
+}
+
+func TestFingerprintProcessorSkipsExcludedSourceIP(t *testing.T) {
+	emitter := &stubEmitter{}
+	processor := NewFingerprintProcessor(emitter, false, []string{"192.168.0.10"}, nil)
+
+	if err := processor.ProcessPacket(context.Background(), tlsEvent(t, tlsRecord())); err != nil {
+		t.Fatalf("ProcessPacket returned error: %v", err)
+	}
+	if emitter.result != nil {
+		t.Fatalf("did not expect emitted result for excluded source IP: %#v", emitter.result)
+	}
+}
+
+func TestFingerprintProcessorSkipsExcludedDestinationIP(t *testing.T) {
+	emitter := &stubEmitter{}
+	processor := NewFingerprintProcessor(emitter, false, nil, []string{"192.168.0.20"})
+
+	if err := processor.ProcessPacket(context.Background(), tlsEvent(t, tlsRecord())); err != nil {
+		t.Fatalf("ProcessPacket returned error: %v", err)
+	}
+	if emitter.result != nil {
+		t.Fatalf("did not expect emitted result for excluded destination IP: %#v", emitter.result)
+	}
+}
+
+func TestFingerprintProcessorEmitsForNonExcludedIPs(t *testing.T) {
+	emitter := &stubEmitter{}
+	processor := NewFingerprintProcessor(emitter, false, []string{"10.0.0.1"}, []string{"8.8.8.8"})
+
+	if err := processor.ProcessPacket(context.Background(), tlsEvent(t, tlsRecord())); err != nil {
+		t.Fatalf("ProcessPacket returned error: %v", err)
+	}
+	if emitter.result == nil {
+		t.Fatal("expected emitted result for non-excluded IPs")
 	}
 }
 

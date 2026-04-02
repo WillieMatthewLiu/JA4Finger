@@ -15,9 +15,10 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
+	"github.com/nextinfra/ja4finger/engine"
 )
 
-func withStubRunners(t *testing.T, live func(context.Context, string, io.Writer, io.Writer, bool, string) error, pcap func(context.Context, string, io.Writer, io.Writer, bool, string) error) {
+func withStubRunners(t *testing.T, live func(context.Context, string, io.Writer, io.Writer, bool, string, engine.LiveOptions) error, pcap func(context.Context, string, io.Writer, io.Writer, bool, string) error) {
 	t.Helper()
 
 	originalLive := runLiveMode
@@ -49,7 +50,7 @@ func TestRunLiveRequiresInterface(t *testing.T) {
 func TestRunLiveAcceptsInterface(t *testing.T) {
 	var called string
 	withStubRunners(t,
-		func(_ context.Context, iface string, _, _ io.Writer, _ bool, _ string) error {
+		func(_ context.Context, iface string, _, _ io.Writer, _ bool, _ string, _ engine.LiveOptions) error {
 			called = iface
 			return nil
 		},
@@ -67,7 +68,7 @@ func TestRunLiveAcceptsConfigFile(t *testing.T) {
 	configPath := writeLiveConfig(t, "live:\n  interface: eth1\n")
 	var called string
 	withStubRunners(t,
-		func(_ context.Context, iface string, _, _ io.Writer, _ bool, _ string) error {
+		func(_ context.Context, iface string, _, _ io.Writer, _ bool, _ string, _ engine.LiveOptions) error {
 			called = iface
 			return nil
 		},
@@ -86,7 +87,7 @@ func TestRunLiveInterfaceOverridesConfigFile(t *testing.T) {
 	configPath := writeLiveConfig(t, "live:\n  interface: eth1\n")
 	var called string
 	withStubRunners(t,
-		func(_ context.Context, iface string, _, _ io.Writer, _ bool, _ string) error {
+		func(_ context.Context, iface string, _, _ io.Writer, _ bool, _ string, _ engine.LiveOptions) error {
 			called = iface
 			return nil
 		},
@@ -101,9 +102,33 @@ func TestRunLiveInterfaceOverridesConfigFile(t *testing.T) {
 	}
 }
 
+func TestRunLivePassesExcludeIPsFromConfig(t *testing.T) {
+	configPath := writeLiveConfig(t, "live:\n  interface: eth1\n  exclude_src_ips:\n    - 192.168.1.10\n    - 10.0.0.5\n  exclude_dst_ips:\n    - 8.8.8.8\n")
+	var got engine.LiveOptions
+	withStubRunners(t,
+		func(_ context.Context, _ string, _, _ io.Writer, _ bool, _ string, options engine.LiveOptions) error {
+			got = options
+			return nil
+		},
+		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+	)
+
+	if err := run([]string{"live", "--config", configPath}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.ExcludeSrcIPs) != 2 || got.ExcludeSrcIPs[0] != "192.168.1.10" || got.ExcludeSrcIPs[1] != "10.0.0.5" {
+		t.Fatalf("unexpected source exclusions: %#v", got.ExcludeSrcIPs)
+	}
+	if len(got.ExcludeDstIPs) != 1 || got.ExcludeDstIPs[0] != "8.8.8.8" {
+		t.Fatalf("unexpected destination exclusions: %#v", got.ExcludeDstIPs)
+	}
+}
+
 func TestRunLiveShortFlag(t *testing.T) {
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string, engine.LiveOptions) error {
+			return nil
+		},
 		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
 	)
 	if err := run([]string{"live", "-i", "eth0"}); err != nil {
@@ -124,7 +149,9 @@ func TestRunPCAPRequiresFile(t *testing.T) {
 func TestRunPCAPAcceptsFile(t *testing.T) {
 	var called string
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string, engine.LiveOptions) error {
+			return nil
+		},
 		func(_ context.Context, file string, _, _ io.Writer, _ bool, _ string) error {
 			called = file
 			return nil
@@ -140,7 +167,9 @@ func TestRunPCAPAcceptsFile(t *testing.T) {
 
 func TestRunPCAPShortFlag(t *testing.T) {
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string, engine.LiveOptions) error {
+			return nil
+		},
 		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
 	)
 	if err := run([]string{"pcap", "-f", "capture.pcap"}); err != nil {
@@ -190,6 +219,30 @@ func TestRunLiveRejectsConfigWithoutInterface(t *testing.T) {
 	}
 }
 
+func TestRunLiveRejectsInvalidExcludeSourceIP(t *testing.T) {
+	configPath := writeLiveConfig(t, "live:\n  interface: eth1\n  exclude_src_ips:\n    - not-an-ip\n")
+
+	err := run([]string{"live", "--config", configPath})
+	if err == nil {
+		t.Fatal("expected error when exclude source IP is invalid")
+	}
+	if !strings.Contains(err.Error(), "exclude_src_ips") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunLiveRejectsInvalidExcludeDestinationIP(t *testing.T) {
+	configPath := writeLiveConfig(t, "live:\n  interface: eth1\n  exclude_dst_ips:\n    - bad-ip\n")
+
+	err := run([]string{"live", "--config", configPath})
+	if err == nil {
+		t.Fatal("expected error when exclude destination IP is invalid")
+	}
+	if !strings.Contains(err.Error(), "exclude_dst_ips") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRunLiveRejectsInvalidConfig(t *testing.T) {
 	configPath := writeLiveConfig(t, "interface: [\n")
 
@@ -215,7 +268,9 @@ func TestRunUnknownSubcommand(t *testing.T) {
 func TestRunPropagatesExecutorError(t *testing.T) {
 	expected := errors.New("boom")
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return expected },
+		func(context.Context, string, io.Writer, io.Writer, bool, string, engine.LiveOptions) error {
+			return expected
+		},
 		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
 	)
 
@@ -248,7 +303,9 @@ func TestRunLiveReturnsStartupErrorForInvalidInterface(t *testing.T) {
 func TestRunPCAPUsesDefaultLogFile(t *testing.T) {
 	var logFile string
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string, engine.LiveOptions) error {
+			return nil
+		},
 		func(_ context.Context, _ string, _, _ io.Writer, _ bool, path string) error {
 			logFile = path
 			return nil
@@ -268,7 +325,9 @@ func TestRunPCAPUsesDefaultLogFile(t *testing.T) {
 func TestRunPCAPAcceptsCustomLogFile(t *testing.T) {
 	var logFile string
 	withStubRunners(t,
-		func(context.Context, string, io.Writer, io.Writer, bool, string) error { return nil },
+		func(context.Context, string, io.Writer, io.Writer, bool, string, engine.LiveOptions) error {
+			return nil
+		},
 		func(_ context.Context, _ string, _, _ io.Writer, _ bool, path string) error {
 			logFile = path
 			return nil

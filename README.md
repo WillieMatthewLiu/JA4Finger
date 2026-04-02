@@ -45,6 +45,10 @@ Example config:
 ```yaml
 live:
   interface: eth0
+  exclude_src_ips:
+    - 192.168.1.10
+  exclude_dst_ips:
+    - 8.8.8.8
 ```
 
 Output is JSON lines on stdout with these fields:
@@ -79,6 +83,7 @@ These two fields are the normalized raw strings used as JA4 hash inputs, not the
 - `pcap` and `live` share the same decode, fingerprint, and output pipeline.
 - `--debug-hash-inputs` is available on both `pcap` and `live`.
 - In `live` mode, `--interface` takes precedence over `--config`; if `--interface` is omitted, the tool reads `live.interface` from the YAML config file.
+- In `live` mode, the YAML config can optionally define `exclude_src_ips` and `exclude_dst_ips` so packets involving those IPs are skipped before TLS fingerprinting.
 - `live` requires Linux `AF_PACKET` support plus privileges to open the requested interface.
 - Non-Linux builds return a startup error for `live` instead of silently pretending support exists.
 - The current implementation only fingerprints TLS ClientHello traffic that is fully present in a single captured TCP payload.

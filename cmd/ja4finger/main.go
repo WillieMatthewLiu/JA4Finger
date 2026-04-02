@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -47,7 +48,7 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 		if err != nil {
 			return err
 		}
-		return runLiveMode(ctx, parsed.value, stdout, stderr, parsed.debugHashInputs, parsed.logFile)
+		return runLiveMode(ctx, parsed.value, stdout, stderr, parsed.debugHashInputs, parsed.logFile, parsed.liveOptions)
 	case "pcap":
 		parsed, err := parseCommandFlags("pcap", args[1:], "file", "f", "path to the PCAP file to analyze")
 		if err != nil {
@@ -63,6 +64,13 @@ type commandFlags struct {
 	value           string
 	debugHashInputs bool
 	logFile         string
+	liveOptions     engine.LiveOptions
+}
+
+type liveConfig struct {
+	Interface     string
+	ExcludeSrcIPs []string
+	ExcludeDstIPs []string
 }
 
 func parseLiveFlags(args []string) (*commandFlags, error) {
@@ -79,16 +87,16 @@ func parseLiveFlags(args []string) (*commandFlags, error) {
 		return nil, fmt.Errorf("live subcommand does not accept positional arguments: %s", strings.Join(leftovers, " "))
 	}
 
+	config, err := loadLiveConfig(strings.TrimSpace(*configPath))
+	if err != nil {
+		return nil, err
+	}
 	value := strings.TrimSpace(*longVal)
 	if value == "" {
 		value = strings.TrimSpace(*shortVal)
 	}
 	if value == "" {
-		var err error
-		value, err = loadLiveInterfaceFromConfig(strings.TrimSpace(*configPath))
-		if err != nil {
-			return nil, err
-		}
+		value = config.Interface
 	}
 	if value == "" {
 		return nil, errors.New("live subcommand requires --interface or --config with live.interface")
@@ -102,6 +110,10 @@ func parseLiveFlags(args []string) (*commandFlags, error) {
 		value:           value,
 		debugHashInputs: *debugHashInputs,
 		logFile:         resolvedLogFile,
+		liveOptions: engine.LiveOptions{
+			ExcludeSrcIPs: append([]string(nil), config.ExcludeSrcIPs...),
+			ExcludeDstIPs: append([]string(nil), config.ExcludeDstIPs...),
+		},
 	}, nil
 }
 
@@ -139,19 +151,21 @@ func defaultLogFilePath(subcommand string, now time.Time) string {
 	return filepath.Join("logs", now.Format("20060102")+"-ja4finger-"+subcommand+".log")
 }
 
-func loadLiveInterfaceFromConfig(path string) (string, error) {
+func loadLiveConfig(path string) (*liveConfig, error) {
+	config := &liveConfig{}
 	if path == "" {
-		return "", nil
+		return config, nil
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("opening config file %q: %w", path, err)
+		return nil, fmt.Errorf("opening config file %q: %w", path, err)
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	inLive := false
+	currentList := ""
 	for lineNo := 1; scanner.Scan(); lineNo++ {
 		raw := scanner.Text()
 		trimmed := strings.TrimSpace(raw)
@@ -162,8 +176,9 @@ func loadLiveInterfaceFromConfig(path string) (string, error) {
 		indent := len(raw) - len(strings.TrimLeft(raw, " "))
 		if indent == 0 {
 			inLive = false
+			currentList = ""
 			if strings.Contains(trimmed, ": ") {
-				return "", fmt.Errorf("config file %q: root entries must be sections, got line %d", path, lineNo)
+				return nil, fmt.Errorf("config file %q: root entries must be sections, got line %d", path, lineNo)
 			}
 			if trimmed != "live:" {
 				continue
@@ -175,24 +190,65 @@ func loadLiveInterfaceFromConfig(path string) (string, error) {
 		if !inLive {
 			continue
 		}
+		if strings.HasPrefix(trimmed, "- ") {
+			if currentList == "" {
+				return nil, fmt.Errorf("config file %q: invalid YAML near line %d", path, lineNo)
+			}
+			item := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+			if item == "" {
+				return nil, fmt.Errorf("config file %q: empty list item near line %d", path, lineNo)
+			}
+			switch currentList {
+			case "exclude_src_ips":
+				config.ExcludeSrcIPs = append(config.ExcludeSrcIPs, item)
+			case "exclude_dst_ips":
+				config.ExcludeDstIPs = append(config.ExcludeDstIPs, item)
+			}
+			continue
+		}
 		if !strings.Contains(trimmed, ":") {
-			return "", fmt.Errorf("config file %q: invalid YAML near line %d", path, lineNo)
+			return nil, fmt.Errorf("config file %q: invalid YAML near line %d", path, lineNo)
 		}
 		key, value, found := strings.Cut(trimmed, ":")
 		if !found {
-			return "", fmt.Errorf("config file %q: invalid YAML near line %d", path, lineNo)
+			return nil, fmt.Errorf("config file %q: invalid YAML near line %d", path, lineNo)
 		}
-		if strings.TrimSpace(key) != "interface" {
-			continue
-		}
+		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if value == "" {
-			return "", fmt.Errorf("config file %q: live.interface must not be empty", path)
+		currentList = ""
+		switch key {
+		case "interface":
+			if value == "" {
+				return nil, fmt.Errorf("config file %q: live.interface must not be empty", path)
+			}
+			config.Interface = value
+		case "exclude_src_ips", "exclude_dst_ips":
+			if value != "" {
+				return nil, fmt.Errorf("config file %q: %s must use YAML list syntax", path, key)
+			}
+			currentList = key
 		}
-		return value, nil
 	}
 	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("reading config file %q: %w", path, err)
+		return nil, fmt.Errorf("reading config file %q: %w", path, err)
 	}
-	return "", fmt.Errorf("config file %q: missing live.interface", path)
+	if config.Interface == "" {
+		return nil, fmt.Errorf("config file %q: missing live.interface", path)
+	}
+	if err := validateConfiguredIPs(path, "exclude_src_ips", config.ExcludeSrcIPs); err != nil {
+		return nil, err
+	}
+	if err := validateConfiguredIPs(path, "exclude_dst_ips", config.ExcludeDstIPs); err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+func validateConfiguredIPs(path, field string, values []string) error {
+	for _, value := range values {
+		if net.ParseIP(value) == nil {
+			return fmt.Errorf("config file %q: %s contains invalid IP %q", path, field, value)
+		}
+	}
+	return nil
 }
