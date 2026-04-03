@@ -1,5 +1,7 @@
+pub mod aggregator;
 pub mod capture;
 pub mod cli;
+pub mod commands;
 pub mod config;
 pub mod fingerprint;
 pub mod output;

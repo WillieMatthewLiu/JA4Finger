@@ -65,6 +65,18 @@ fn unique_temp_pcap_path(tag: &str) -> PathBuf {
     ))
 }
 
+fn unique_temp_text_path(tag: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos();
+
+    std::env::temp_dir().join(format!(
+        "ja4finger-{tag}-{}-{nanos}.log",
+        std::process::id()
+    ))
+}
+
 fn unique_temp_dir(tag: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -131,6 +143,10 @@ fn write_pcap(path: &Path, frames: &[Vec<u8>]) {
     }
 
     writer.flush().expect("pcap writer should flush");
+}
+
+fn write_text_fixture(path: &Path, content: &str) {
+    std::fs::write(path, content).expect("text fixture should be writable");
 }
 
 fn tcp_syn_frame() -> Vec<u8> {
@@ -305,6 +321,22 @@ fn pcap_requires_file_argument() {
 }
 
 #[test]
+fn aggregate_requires_file_argument() {
+    let output = run(&["aggregate", "--window-secs", "300"]);
+
+    assert!(
+        !output.status.success(),
+        "aggregate without --file should fail"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--file"),
+        "stderr should mention missing --file, got: {stderr}"
+    );
+}
+
+#[test]
 fn help_lists_supported_subcommands() {
     let output = run(&["--help"]);
 
@@ -318,6 +350,107 @@ fn help_lists_supported_subcommands() {
     assert!(
         stdout.contains("pcap"),
         "help output should mention pcap, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("aggregate"),
+        "help output should mention aggregate, got: {stdout}"
+    );
+}
+
+#[test]
+fn aggregate_correlates_daemon_log_records_within_window() {
+    let input_path = unique_temp_text_path("aggregate-daemon");
+    write_text_fixture(
+        &input_path,
+        "\
+mode=daemon status=ready iface=eth0
+ts=10.000000 mode=daemon kind=ja4 value=ja4-alpha src=192.168.1.10:42424 dst=192.168.1.20:443
+ts=11.000000 mode=daemon kind=ja4h value=ja4h-alpha src=192.168.1.10:42424 dst=192.168.1.20:443
+ts=12.000000 mode=daemon kind=ja4h value=ja4h-alpha src=192.168.1.10:42424 dst=192.168.1.20:443
+ts=13.000000 mode=daemon kind=ja4t value=ja4t-alpha src=192.168.1.10:42424 dst=192.168.1.20:443
+ts=14.000000 mode=daemon kind=ja4h value=ignored-other-src src=192.168.1.11:42424 dst=192.168.1.20:443
+mode=daemon packets_seen=5 flows_tracked=1 fingerprints_emitted=4 parse_failures=0 extraction_failures=0
+",
+    );
+    let input_arg = input_path.to_string_lossy().to_string();
+
+    let output = run(&["aggregate", "--file", &input_arg, "--window-secs", "5"]);
+
+    let _ = std::fs::remove_file(&input_path);
+
+    assert!(
+        output.status.success(),
+        "aggregate should succeed for valid daemon log input"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pair_lines = stdout
+        .lines()
+        .filter(|line| line.contains("anchor_ts="))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        pair_lines.len(),
+        2,
+        "expected one JA4+JA4H line and one JA4+JA4T line: {stdout}"
+    );
+    assert!(
+        stdout.contains("ja4=ja4-alpha ja4h=ja4h-alpha ja4t="),
+        "stdout should include JA4 plus JA4H correlation: {stdout}"
+    );
+    assert!(
+        stdout.contains("ja4=ja4-alpha ja4h= ja4t=ja4t-alpha"),
+        "stdout should include JA4 plus JA4T correlation: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ignored-other-src"),
+        "stdout should not include mismatched src/dst records: {stdout}"
+    );
+}
+
+#[test]
+fn aggregate_correlates_pcap_output_records_within_window() {
+    let input_path = unique_temp_text_path("aggregate-pcap");
+    write_text_fixture(
+        &input_path,
+        "\
+ts=20.000000 mode=pcap kind=ja4 value=ja4-beta src=10.0.0.1:50000 dst=10.0.0.2:443
+ts=24.000000 mode=pcap kind=ja4t value=ja4t-beta src=10.0.0.1:50000 dst=10.0.0.2:443
+ts=40.000000 mode=pcap kind=ja4h value=too-late src=10.0.0.1:50000 dst=10.0.0.2:443
+mode=pcap packets_seen=3 flows_tracked=1 fingerprints_emitted=3 parse_failures=0 extraction_failures=0
+",
+    );
+    let input_arg = input_path.to_string_lossy().to_string();
+
+    let output = run(&["aggregate", "--file", &input_arg, "--window-secs", "10"]);
+
+    let _ = std::fs::remove_file(&input_path);
+
+    assert!(
+        output.status.success(),
+        "aggregate should succeed for valid pcap output input"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pair_lines = stdout
+        .lines()
+        .filter(|line| line.contains("anchor_ts="))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        pair_lines.len(),
+        1,
+        "expected one correlated line: {stdout}"
+    );
+    assert!(
+        stdout.contains("src=10.0.0.1:50000 dst=10.0.0.2:443"),
+        "stdout should preserve full endpoints in grouping key: {stdout}"
+    );
+    assert!(
+        stdout.contains("ja4=ja4-beta ja4h= ja4t=ja4t-beta"),
+        "stdout should include JA4 plus JA4T correlation: {stdout}"
+    );
+    assert!(
+        !stdout.contains("too-late"),
+        "stdout should exclude records outside the configured window: {stdout}"
     );
 }
 

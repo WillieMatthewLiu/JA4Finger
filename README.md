@@ -6,10 +6,11 @@
 - `JA4`：TLS ClientHello 指纹
 - `JA4H`：明文 `HTTP/1.x` 和明文 `h2c` 指纹
 
-工具提供两个运行模式：
+工具当前提供三个子命令：
 
 - `pcap`：离线分析 PCAP 文件
 - `daemon`：在 Linux 网卡上前台持续抓包
+- `aggregate`：离线关联分析 `daemon` 日志或 `pcap` 文本输出
 
 ## 构建
 
@@ -44,9 +45,9 @@ bash ./scripts/package-musl-release.sh
 默认产物路径示例：
 
 ```text
-dist/ja4finger-v0.1.0-x86_64-unknown-linux-musl/
-dist/ja4finger-v0.1.0-x86_64-unknown-linux-musl.tar.gz
-dist/ja4finger-v0.1.0-x86_64-unknown-linux-musl.sha256
+dist/ja4finger-v1.1.7-x86_64-unknown-linux-musl/
+dist/ja4finger-v1.1.7-x86_64-unknown-linux-musl.tar.gz
+dist/ja4finger-v1.1.7-x86_64-unknown-linux-musl.sha256
 ```
 
 如果你要覆盖目标架构，可以用环境变量：
@@ -68,12 +69,14 @@ ja4finger <COMMAND>
 ```bash
 ja4finger daemon --config <FILE>
 ja4finger pcap --file <FILE>
+ja4finger aggregate --file <FILE> --window-secs <SECONDS>
 ```
 
 如果还没有安装到系统路径，可以直接用 `cargo run`：
 
 ```bash
 cargo run -- daemon --config ./daemon.yaml
+cargo run -- aggregate --file ./logs/20260403-ja4finger.log --window-secs 300
 cargo run -- pcap --file ./sample.pcap
 ```
 
@@ -150,6 +153,44 @@ daemon:
 - 默认会在当前目录创建 `./logs/`，并将日志追加写入 `yyyyMMdd-ja4finger.log`
 - 进程收到支持的终止信号后会尽量干净退出，并把最终摘要写入日志文件
 - 如果网卡不存在或权限不足，进程会以非零状态退出
+
+## 聚合分析模式
+
+`aggregate` 模式用于离线分析 `daemon` 日志或 `pcap` 子命令输出的文本结果。
+
+示例：
+
+```bash
+./target/debug/ja4finger aggregate --file ./logs/20260403-ja4finger.log --window-secs 300
+```
+
+输出规则：
+
+- 只读取带有 `ts`、`kind`、`value`、`src`、`dst` 的指纹行
+- 自动跳过 `status` 行和 summary 行
+- 按完整 `src` + `dst` 端点聚合，包含端口
+- 以每条 `ja4` 为锚点，在 `[ja4_ts, ja4_ts + window_secs)` 内查找同一 `src/dst` 的 `ja4h` 或 `ja4t`
+- 只有存在 `ja4 + ja4h` 或 `ja4 + ja4t` 关联时才输出
+- 相同锚点下的重复 `ja4h` / `ja4t` 值会去重，但不会把 `ja4h` 和 `ja4t` 压成同一条组合记录
+
+示例输出：
+
+```text
+anchor_ts=10.000000 window_secs=300 src=192.168.1.10:42424 dst=192.168.1.20:443 ja4=ja4-alpha ja4h=ja4h-alpha ja4t=
+anchor_ts=10.000000 window_secs=300 src=192.168.1.10:42424 dst=192.168.1.20:443 ja4=ja4-alpha ja4h= ja4t=ja4t-alpha
+```
+
+## 源码结构
+
+当前 CLI 按子命令拆分到 `src/commands/`：
+
+- `src/main.rs`：薄入口，只负责初始化日志、解析命令、分发子命令、统一退出码
+- `src/cli.rs`：`clap` 命令定义
+- `src/commands/daemon.rs`：`daemon` 子命令入口和 daemon 相关测试
+- `src/commands/pcap.rs`：`pcap` 子命令入口和包处理流程
+- `src/commands/aggregate.rs`：`aggregate` 子命令入口
+- `src/aggregator.rs`：聚合分析的纯逻辑实现
+- 其他模块如 `capture.rs`、`config.rs`、`fingerprint.rs`、`output.rs`、`pipeline.rs`、`runtime.rs` 继续负责抓包、配置、指纹提取、输出和运行时支持
 
 ## 支持边界
 

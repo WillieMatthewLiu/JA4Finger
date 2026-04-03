@@ -21,6 +21,15 @@ pub enum Command {
         #[arg(long)]
         file: String,
     },
+    /// Correlate JA4-based fingerprint records from daemon logs or pcap text output
+    Aggregate {
+        /// Path to a text file produced by daemon logs or pcap output
+        #[arg(long)]
+        file: String,
+        /// Correlation window in seconds, anchored on each JA4 event
+        #[arg(long)]
+        window_secs: u64,
+    },
 }
 
 pub fn parse() -> Cli {
