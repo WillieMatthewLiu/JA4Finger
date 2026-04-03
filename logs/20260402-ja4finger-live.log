@@ -1,8 +1,0 @@
-{"src_ip":"192.168.0.236","src_port":43490,"dst_ip":"120.232.178.243","dst_port":12002,"protocol":"tls","fingerprint_type":"ja4","fingerprint":"t12d141000_20a10634286c_cc51b52e28e4"}
-{"src_ip":"192.168.0.236","src_port":56640,"dst_ip":"120.232.178.243","dst_port":12002,"protocol":"tls","fingerprint_type":"ja4","fingerprint":"t12d141000_20a10634286c_cc51b52e28e4"}
-{"src_ip":"192.168.0.236","src_port":56678,"dst_ip":"120.232.178.243","dst_port":12002,"protocol":"tls","fingerprint_type":"ja4","fingerprint":"t12d141000_20a10634286c_cc51b52e28e4"}
-{"src_ip":"192.168.0.236","src_port":56656,"dst_ip":"120.232.178.243","dst_port":12002,"protocol":"tls","fingerprint_type":"ja4","fingerprint":"t12d141000_20a10634286c_cc51b52e28e4"}
-{"src_ip":"192.168.0.236","src_port":56670,"dst_ip":"120.232.178.243","dst_port":12002,"protocol":"tls","fingerprint_type":"ja4","fingerprint":"t12d141000_20a10634286c_cc51b52e28e4"}
-{"src_ip":"2409:8d00:100c:384c:eb87:8dcf:3c43:f351","src_port":56898,"dst_ip":"2606:4700::6812:797","dst_port":443,"protocol":"tls","fingerprint_type":"ja4","fingerprint":"t13d101000_61a7ad8aa9b6_35d235a1c490"}
-{"src_ip":"192.168.0.236","src_port":36030,"dst_ip":"120.232.178.243","dst_port":12002,"protocol":"tls","fingerprint_type":"ja4","fingerprint":"t12d141000_20a10634286c_cc51b52e28e4"}
-{"src_ip":"2409:8d00:100c:384c:eb87:8dcf:3c43:f351","src_port":57456,"dst_ip":"2606:4700:10::ac42:af6b","dst_port":443,"protocol":"tls","fingerprint_type":"ja4","fingerprint":"t13d1011h2_61a7ad8aa9b6_3fcd1a44f3e3"}

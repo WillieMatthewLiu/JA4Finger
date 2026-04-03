@@ -1,0 +1,181 @@
+# JA4Finger
+
+`JA4Finger` 是一个 Rust 实现的 JA4 家族指纹工具，当前支持：
+
+- `JA4T`：TCP client SYN 指纹
+- `JA4`：TLS ClientHello 指纹
+- `JA4H`：明文 `HTTP/1.x` 和明文 `h2c` 指纹
+
+工具提供两个运行模式：
+
+- `pcap`：离线分析 PCAP 文件
+- `daemon`：在 Linux 网卡上前台持续抓包
+
+## 构建
+
+```bash
+cargo build
+```
+
+调试运行也可以直接使用：
+
+```bash
+cargo run -- --help
+```
+
+## 一键产出可分发的 musl 发布包
+
+如果你要把二进制拷到其他 Linux 机器运行，优先使用 `musl` 发布包，而不是默认的 `glibc` 动态链接版本。
+
+一键打包：
+
+```bash
+bash ./scripts/package-musl-release.sh
+```
+
+脚本会自动完成：
+
+- 检查并安装 `x86_64-unknown-linux-musl` Rust target
+- 构建 `release` 二进制
+- 在 `dist/` 下生成可分发目录
+- 生成 `.tar.gz` 压缩包
+- 生成对应的 `sha256` 校验文件
+
+默认产物路径示例：
+
+```text
+dist/ja4finger-v0.1.0-x86_64-unknown-linux-musl/
+dist/ja4finger-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+dist/ja4finger-v0.1.0-x86_64-unknown-linux-musl.sha256
+```
+
+如果你要覆盖目标架构，可以用环境变量：
+
+```bash
+TARGET=x86_64-unknown-linux-musl bash ./scripts/package-musl-release.sh
+```
+
+## 命令行用法
+
+总览：
+
+```bash
+ja4finger <COMMAND>
+```
+
+可用子命令：
+
+```bash
+ja4finger daemon --config <FILE>
+ja4finger pcap --file <FILE>
+```
+
+如果还没有安装到系统路径，可以直接用 `cargo run`：
+
+```bash
+cargo run -- daemon --config ./daemon.yaml
+cargo run -- pcap --file ./sample.pcap
+```
+
+## 离线分析 PCAP
+
+分析一个 PCAP 文件：
+
+```bash
+./target/debug/ja4finger pcap --file ./sample.pcap
+```
+
+常见输出包含两类：
+
+1. 指纹输出
+2. 运行摘要
+
+示例：
+
+```text
+ts=1.000000 mode=pcap kind=ja4h value=ge11cr04enus_33f7519adbc8_6263fd0189b4_230379c57c15 src=192.168.1.10:42424 dst=192.168.1.20:80
+mode=pcap packets_seen=1 flows_tracked=1 fingerprints_emitted=1 parse_failures=0 extraction_failures=0
+```
+
+字段说明：
+
+- `ts`：包时间戳
+- `mode`：运行模式，`pcap` 或 `daemon`
+- `kind`：指纹类型，`ja4` / `ja4h` / `ja4t`
+- `value`：指纹值
+- `src` / `dst`：源和目标端点
+- `packets_seen`：处理过的包数
+- `flows_tracked`：当前跟踪到的流数
+- `fingerprints_emitted`：成功输出的指纹数
+- `parse_failures`：可恢复解析失败次数
+- `extraction_failures`：特征提取失败次数
+
+## 前台抓包模式
+
+`daemon` 模式通过 YAML 文件加载监听网卡、源地址排除、目的地址排除和日志输出位置。
+
+最小 `daemon.yaml` 示例：
+
+```yaml
+daemon:
+  iface: eth0
+  src_excludes: []
+  dst_excludes: []
+```
+
+如果你需要显式配置日志目录和文件名，可以写成：
+
+```yaml
+daemon:
+  iface: eth0
+  src_excludes:
+    - 127.0.0.1
+    - 10.0.0.0/8
+  dst_excludes:
+    - 192.168.1.100
+    - 172.16.0.0/12
+  log_dir: logs
+  log_file: ja4finger.log
+```
+
+运行示例：
+
+```bash
+./target/debug/ja4finger daemon --config ./daemon.yaml
+```
+
+说明：
+
+- `daemon` 模式是前台长运行进程，适合交给 `systemd` 或其他 supervisor 管理
+- 默认会在当前目录创建 `./logs/`，并将日志追加写入 `yyyyMMdd-ja4finger.log`
+- 进程收到支持的终止信号后会尽量干净退出，并把最终摘要写入日志文件
+- 如果网卡不存在或权限不足，进程会以非零状态退出
+
+## 支持边界
+
+当前明确支持：
+
+- `JA4T`
+- `JA4`
+- `JA4H` on cleartext `HTTP/1.x`
+- `JA4H` on cleartext `h2c`
+
+当前不支持：
+
+- TLS 承载的 `h2`
+- `HTTP/3`
+- `QUIC`
+
+## 开发验证
+
+运行测试：
+
+```bash
+cargo test
+```
+
+检查格式：
+
+```bash
+cargo fmt --check
+```
