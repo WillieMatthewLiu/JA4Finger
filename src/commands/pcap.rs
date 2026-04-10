@@ -3,7 +3,9 @@ use crate::config::DaemonRuntimeConfig;
 use crate::fingerprint::{
     FingerprintKind, HttpClientFeatures, TcpClientFeatures, TlsClientHelloFeatures,
 };
-use crate::output::{FingerprintEmission, RuntimeMode};
+use crate::output::{
+    FingerprintEmission, RuntimeMode, TcpLifecycleEmission, TcpLifecycleEvent, TcpLifecycleFlag,
+};
 use crate::pipeline::{DecodedPacket, Pipeline, PipelineRuntime};
 use crate::runtime::RuntimeState;
 
@@ -74,6 +76,62 @@ fn render_packet_fingerprint(
     FingerprintEmission::from_packet_context(record, decoded, mode, kind, value).render()
 }
 
+fn render_open_lifecycle_lines(
+    record: &PacketRecord,
+    decoded: &DecodedPacket,
+    mode: RuntimeMode,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if decoded.tcp_flags.as_ref().is_some_and(|flags| flags.syn) {
+        lines.push(
+            TcpLifecycleEmission::from_packet_context(
+                record,
+                decoded,
+                mode,
+                TcpLifecycleEvent::Open,
+                TcpLifecycleFlag::Syn,
+            )
+            .render(),
+        );
+    }
+    lines
+}
+
+fn render_close_lifecycle_lines(
+    record: &PacketRecord,
+    decoded: &DecodedPacket,
+    mode: RuntimeMode,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(flags) = decoded.tcp_flags.as_ref() {
+        if flags.fin {
+            lines.push(
+                TcpLifecycleEmission::from_packet_context(
+                    record,
+                    decoded,
+                    mode.clone(),
+                    TcpLifecycleEvent::Close,
+                    TcpLifecycleFlag::Fin,
+                )
+                .render(),
+            );
+        }
+        if flags.rst {
+            lines.push(
+                TcpLifecycleEmission::from_packet_context(
+                    record,
+                    decoded,
+                    mode,
+                    TcpLifecycleEvent::Close,
+                    TcpLifecycleFlag::Rst,
+                )
+                .render(),
+            );
+        }
+    }
+    lines
+}
+
 fn excluded_by_daemon_config(config: &DaemonRuntimeConfig, decoded: &DecodedPacket) -> bool {
     let Ok(src_ip) = decoded.flow_key.src_ip.parse() else {
         return false;
@@ -109,13 +167,21 @@ where
         return Ok(());
     }
 
+    for line in render_open_lifecycle_lines(&record, &decoded, mode.clone()) {
+        emit_line(line)?;
+    }
+
     match extract_fingerprint(&record, &decoded) {
         Some((kind, value)) => {
-            let rendered = render_packet_fingerprint(&record, &decoded, mode, kind, value);
+            let rendered = render_packet_fingerprint(&record, &decoded, mode.clone(), kind, value);
             emit_line(rendered)?;
             runtime_state.record_fingerprint_emitted();
         }
         None => runtime.record_extraction_failure(),
+    }
+
+    for line in render_close_lifecycle_lines(&record, &decoded, mode) {
+        emit_line(line)?;
     }
 
     Ok(())

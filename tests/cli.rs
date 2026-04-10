@@ -172,6 +172,17 @@ fn tcp_syn_frame() -> Vec<u8> {
     frame
 }
 
+fn tcp_fin_frame() -> Vec<u8> {
+    let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+        .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
+        .tcp(42424, 443, 2, 4096)
+        .fin();
+
+    let mut frame = Vec::with_capacity(builder.size(0));
+    builder.write(&mut frame, &[]).expect("frame should serialize");
+    frame
+}
+
 fn tls_client_hello_payload() -> Vec<u8> {
     vec![
         0x16, 0x03, 0x01, 0x00, 0x61, 0x01, 0x00, 0x00, 0x5d, 0x03, 0x03, 0x00, 0x01, 0x02, 0x03,
@@ -214,6 +225,20 @@ fn http1_request_frame() -> Vec<u8> {
     let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
         .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
         .tcp(42424, 80, 1, 4096);
+
+    let mut frame = Vec::with_capacity(builder.size(payload.len()));
+    builder
+        .write(&mut frame, &payload)
+        .expect("frame should serialize");
+    frame
+}
+
+fn http1_fin_request_frame() -> Vec<u8> {
+    let payload = http1_request_payload();
+    let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+        .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
+        .tcp(42424, 80, 2, 4096)
+        .fin();
 
     let mut frame = Vec::with_capacity(builder.size(payload.len()));
     builder
@@ -322,7 +347,7 @@ fn pcap_requires_file_argument() {
 
 #[test]
 fn aggregate_requires_file_argument() {
-    let output = run(&["aggregate", "--window-secs", "300"]);
+    let output = run(&["aggregate"]);
 
     assert!(
         !output.status.success(),
@@ -358,7 +383,7 @@ fn help_lists_supported_subcommands() {
 }
 
 #[test]
-fn aggregate_correlates_daemon_log_records_within_window() {
+fn aggregate_correlates_daemon_log_records_by_tcp_session() {
     let input_path = unique_temp_text_path("aggregate-daemon");
     write_text_fixture(
         &input_path,
@@ -374,7 +399,7 @@ mode=daemon packets_seen=5 flows_tracked=1 fingerprints_emitted=4 parse_failures
     );
     let input_arg = input_path.to_string_lossy().to_string();
 
-    let output = run(&["aggregate", "--file", &input_arg, "--window-secs", "5"]);
+    let output = run(&["aggregate", "--file", &input_arg]);
 
     let _ = std::fs::remove_file(&input_path);
 
@@ -408,20 +433,21 @@ mode=daemon packets_seen=5 flows_tracked=1 fingerprints_emitted=4 parse_failures
 }
 
 #[test]
-fn aggregate_correlates_pcap_output_records_within_window() {
+fn aggregate_correlates_pcap_output_records_by_tcp_session() {
     let input_path = unique_temp_text_path("aggregate-pcap");
     write_text_fixture(
         &input_path,
         "\
 ts=20.000000 mode=pcap kind=ja4 value=ja4-beta src=10.0.0.1:50000 dst=10.0.0.2:443
 ts=24.000000 mode=pcap kind=ja4t value=ja4t-beta src=10.0.0.1:50000 dst=10.0.0.2:443
-ts=40.000000 mode=pcap kind=ja4h value=too-late src=10.0.0.1:50000 dst=10.0.0.2:443
+ts=40.000000 mode=pcap kind=ja4h value=same-session-ja4h src=10.0.0.1:50000 dst=10.0.0.2:443
+ts=41.000000 mode=pcap kind=ja4h value=other-session-ja4h src=10.0.0.9:50000 dst=10.0.0.2:443
 mode=pcap packets_seen=3 flows_tracked=1 fingerprints_emitted=3 parse_failures=0 extraction_failures=0
 ",
     );
     let input_arg = input_path.to_string_lossy().to_string();
 
-    let output = run(&["aggregate", "--file", &input_arg, "--window-secs", "10"]);
+    let output = run(&["aggregate", "--file", &input_arg]);
 
     let _ = std::fs::remove_file(&input_path);
 
@@ -437,8 +463,8 @@ mode=pcap packets_seen=3 flows_tracked=1 fingerprints_emitted=3 parse_failures=0
 
     assert_eq!(
         pair_lines.len(),
-        1,
-        "expected one correlated line: {stdout}"
+        2,
+        "expected one JA4+JA4T line and one JA4+JA4H line: {stdout}"
     );
     assert!(
         stdout.contains("src=10.0.0.1:50000 dst=10.0.0.2:443"),
@@ -449,8 +475,69 @@ mode=pcap packets_seen=3 flows_tracked=1 fingerprints_emitted=3 parse_failures=0
         "stdout should include JA4 plus JA4T correlation: {stdout}"
     );
     assert!(
-        !stdout.contains("too-late"),
-        "stdout should exclude records outside the configured window: {stdout}"
+        stdout.contains("ja4=ja4-beta ja4h=same-session-ja4h ja4t="),
+        "stdout should include JA4 plus JA4H correlation from the same TCP session: {stdout}"
+    );
+    assert!(
+        !stdout.contains("other-session-ja4h"),
+        "stdout should exclude records from a different TCP session: {stdout}"
+    );
+}
+
+#[test]
+fn lifecycle_aggregate_separates_reconnections_using_tcp_events() {
+    let input_path = unique_temp_text_path("aggregate-lifecycle");
+    write_text_fixture(
+        &input_path,
+        "\
+ ts=1.000000 mode=pcap event=tcp_open flags=syn src=10.0.0.1:50000 dst=10.0.0.2:443
+ ts=1.100000 mode=pcap kind=ja4 value=ja4-alpha src=10.0.0.1:50000 dst=10.0.0.2:443
+ ts=1.200000 mode=pcap event=tcp_close flags=fin src=10.0.0.2:443 dst=10.0.0.1:50000
+ ts=2.000000 mode=pcap event=tcp_open flags=syn src=10.0.0.1:50000 dst=10.0.0.2:443
+ ts=2.100000 mode=pcap kind=ja4h value=ja4h-beta src=10.0.0.1:50000 dst=10.0.0.2:443
+",
+    );
+    let input_arg = input_path.to_string_lossy().to_string();
+
+    let output = run(&["aggregate", "--file", &input_arg]);
+    let _ = std::fs::remove_file(&input_path);
+
+    assert!(
+        output.status.success(),
+        "aggregate should succeed for lifecycle fixture"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "aggregate must not correlate across lifecycle boundaries: {stdout}"
+    );
+}
+
+#[test]
+fn lifecycle_aggregate_uses_reverse_rst_to_close_current_segment() {
+    let input_path = unique_temp_text_path("aggregate-lifecycle-rst");
+    write_text_fixture(
+        &input_path,
+        "\
+ ts=1.000000 mode=pcap event=tcp_open flags=syn src=10.0.0.1:50000 dst=10.0.0.2:443
+ ts=1.100000 mode=pcap kind=ja4 value=ja4-alpha src=10.0.0.1:50000 dst=10.0.0.2:443
+ ts=1.200000 mode=pcap event=tcp_close flags=rst src=10.0.0.2:443 dst=10.0.0.1:50000
+ ts=2.100000 mode=pcap kind=ja4h value=ja4h-beta src=10.0.0.1:50000 dst=10.0.0.2:443
+",
+    );
+    let input_arg = input_path.to_string_lossy().to_string();
+
+    let output = run(&["aggregate", "--file", &input_arg]);
+    let _ = std::fs::remove_file(&input_path);
+
+    assert!(
+        output.status.success(),
+        "aggregate should succeed for lifecycle rst fixture"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "aggregate must not correlate after reverse rst close: {stdout}"
     );
 }
 
@@ -680,6 +767,90 @@ fn pcap_emits_ja4t_and_summary_for_syn_packets() {
     assert!(
         stdout.contains("parse_failures=0"),
         "summary should include parse_failures=0: {stdout}"
+    );
+}
+
+#[test]
+fn lifecycle_pcap_emits_tcp_open_before_ja4t_for_syn_packets() {
+    let pcap_path = unique_temp_pcap_path("lifecycle-syn-open");
+    write_pcap(&pcap_path, &[tcp_syn_frame()]);
+    let pcap_arg = pcap_path.to_string_lossy().to_string();
+
+    let output = run(&["pcap", "--file", &pcap_arg]);
+    let _ = std::fs::remove_file(&pcap_path);
+
+    assert!(output.status.success(), "pcap should succeed for syn packet");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+
+    assert!(
+        lines[0].contains("event=tcp_open flags=syn"),
+        "first line should open: {stdout}"
+    );
+    assert!(
+        lines[1].contains("kind=ja4t"),
+        "second line should be ja4t: {stdout}"
+    );
+}
+
+#[test]
+fn lifecycle_pcap_emits_tcp_close_for_fin_packets() {
+    let pcap_path = unique_temp_pcap_path("lifecycle-fin-close");
+    write_pcap(&pcap_path, &[tcp_fin_frame()]);
+    let pcap_arg = pcap_path.to_string_lossy().to_string();
+
+    let output = run(&["pcap", "--file", &pcap_arg]);
+    let _ = std::fs::remove_file(&pcap_path);
+
+    assert!(output.status.success(), "pcap should succeed for fin packet");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("event=tcp_close flags=fin"),
+        "stdout should include fin close: {stdout}"
+    );
+    assert!(
+        stdout.contains("extraction_failures=1"),
+        "summary should count missing fingerprint: {stdout}"
+    );
+}
+
+#[test]
+fn lifecycle_pcap_emits_fingerprint_before_tcp_close_and_close_before_summary_for_http1_fin_packets() {
+    let pcap_path = unique_temp_pcap_path("lifecycle-http1-fin-order");
+    write_pcap(&pcap_path, &[http1_fin_request_frame()]);
+    let pcap_arg = pcap_path.to_string_lossy().to_string();
+
+    let output = run(&["pcap", "--file", &pcap_arg]);
+    let _ = std::fs::remove_file(&pcap_path);
+
+    assert!(
+        output.status.success(),
+        "pcap should succeed for http1 fin packet"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+
+    let fingerprint_idx = lines
+        .iter()
+        .position(|line| line.contains("kind=ja4h"))
+        .expect("stdout should contain ja4h fingerprint line");
+    let close_idx = lines
+        .iter()
+        .position(|line| line.contains("event=tcp_close flags=fin"))
+        .expect("stdout should contain fin close lifecycle line");
+    let summary_idx = lines
+        .iter()
+        .position(|line| line.starts_with("mode=pcap packets_seen="))
+        .expect("stdout should contain pcap summary line");
+
+    assert!(
+        fingerprint_idx < close_idx,
+        "fingerprint should emit before close: {stdout}"
+    );
+    assert!(
+        close_idx < summary_idx,
+        "close should emit before final summary: {stdout}"
     );
 }
 

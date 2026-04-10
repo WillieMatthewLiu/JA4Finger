@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::fingerprint::FingerprintKind;
 
@@ -12,9 +12,36 @@ pub struct FingerprintEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateEvent {
+    Fingerprint(FingerprintEvent),
+    Lifecycle(LifecycleEvent),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleEventKind {
+    Open,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleFlag {
+    Syn,
+    Fin,
+    Rst,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleEvent {
+    pub timestamp_micros: i64,
+    pub src: String,
+    pub dst: String,
+    pub kind: LifecycleEventKind,
+    pub flag: LifecycleFlag,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateRecord {
     pub anchor_timestamp_micros: i64,
-    pub window_secs: u64,
     pub src: String,
     pub dst: String,
     pub ja4: String,
@@ -25,9 +52,8 @@ pub struct AggregateRecord {
 impl AggregateRecord {
     pub fn render(&self) -> String {
         format!(
-            "anchor_ts={} window_secs={} src={} dst={} ja4={} ja4h={} ja4t={}",
+            "anchor_ts={} src={} dst={} ja4={} ja4h={} ja4t={}",
             render_timestamp_micros(self.anchor_timestamp_micros),
-            self.window_secs,
             self.src,
             self.dst,
             self.ja4,
@@ -37,27 +63,64 @@ impl AggregateRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct CanonicalConnectionKey {
+    endpoint_a: String,
+    endpoint_b: String,
+}
+
+impl CanonicalConnectionKey {
+    fn from_endpoints(src: &str, dst: &str) -> Self {
+        if src <= dst {
+            Self {
+                endpoint_a: src.to_string(),
+                endpoint_b: dst.to_string(),
+            }
+        } else {
+            Self {
+                endpoint_a: dst.to_string(),
+                endpoint_b: src.to_string(),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Segment {
+    connection: CanonicalConnectionKey,
+    fingerprints: Vec<FingerprintEvent>,
+}
+
 pub fn parse_fingerprint_events(input: &str) -> Result<Vec<FingerprintEvent>, String> {
+    Ok(parse_aggregate_events(input)?
+        .into_iter()
+        .filter_map(|event| match event {
+            AggregateEvent::Fingerprint(event) => Some(event),
+            AggregateEvent::Lifecycle(_) => None,
+        })
+        .collect())
+}
+
+pub fn parse_aggregate_events(input: &str) -> Result<Vec<AggregateEvent>, String> {
     let mut events = Vec::new();
 
-    for (line_no, line) in input.lines().enumerate() {
+    for line in input.lines() {
         if line.trim().is_empty() {
             continue;
         }
 
-        match parse_fingerprint_event(line)? {
-            Some(event) => events.push(event),
-            None => {
-                let _ = line_no;
-            }
+        if let Some(event) = parse_aggregate_event(line)? {
+            events.push(event);
         }
     }
 
     Ok(events)
 }
 
-fn parse_fingerprint_event(line: &str) -> Result<Option<FingerprintEvent>, String> {
+fn parse_aggregate_event(line: &str) -> Result<Option<AggregateEvent>, String> {
     let mut ts = None;
+    let mut event_name = None;
+    let mut flags = None;
     let mut kind = None;
     let mut value = None;
     let mut src = None;
@@ -70,13 +133,10 @@ fn parse_fingerprint_event(line: &str) -> Result<Option<FingerprintEvent>, Strin
 
         match key {
             "ts" => ts = Some(parse_timestamp_micros(raw_value)?),
+            "event" => event_name = Some(raw_value),
+            "flags" => flags = Some(raw_value),
             "kind" => {
-                kind = Some(match raw_value {
-                    "ja4" => FingerprintKind::Ja4,
-                    "ja4h" => FingerprintKind::Ja4H,
-                    "ja4t" => FingerprintKind::Ja4T,
-                    _ => return Ok(None),
-                })
+                kind = Some(raw_value)
             }
             "value" => value = Some(raw_value.to_string()),
             "src" => src = Some(raw_value.to_string()),
@@ -88,26 +148,182 @@ fn parse_fingerprint_event(line: &str) -> Result<Option<FingerprintEvent>, Strin
     let Some(timestamp_micros) = ts else {
         return Ok(None);
     };
-    let Some(kind) = kind else {
-        return Ok(None);
-    };
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let Some(src) = src else {
-        return Ok(None);
-    };
-    let Some(dst) = dst else {
-        return Ok(None);
-    };
 
-    Ok(Some(FingerprintEvent {
-        timestamp_micros,
-        src,
-        dst,
-        kind,
-        value,
-    }))
+    if let Some(kind) = kind {
+        let kind = match kind {
+            "ja4" => FingerprintKind::Ja4,
+            "ja4h" => FingerprintKind::Ja4H,
+            "ja4t" => FingerprintKind::Ja4T,
+            _ => return Ok(None),
+        };
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let Some(src) = src else {
+            return Ok(None);
+        };
+        let Some(dst) = dst else {
+            return Ok(None);
+        };
+
+        return Ok(Some(AggregateEvent::Fingerprint(FingerprintEvent {
+            timestamp_micros,
+            src,
+            dst,
+            kind,
+            value,
+        })));
+    }
+
+    if let Some(event_name) = event_name {
+        let kind = match event_name {
+            "tcp_open" => LifecycleEventKind::Open,
+            "tcp_close" => LifecycleEventKind::Close,
+            _ => return Ok(None),
+        };
+        let flag = match flags {
+            Some("syn") => LifecycleFlag::Syn,
+            Some("fin") => LifecycleFlag::Fin,
+            Some("rst") => LifecycleFlag::Rst,
+            _ => return Ok(None),
+        };
+        let Some(src) = src else {
+            return Ok(None);
+        };
+        let Some(dst) = dst else {
+            return Ok(None);
+        };
+
+        let accepted = matches!(
+            (kind, flag),
+            (LifecycleEventKind::Open, LifecycleFlag::Syn)
+                | (LifecycleEventKind::Close, LifecycleFlag::Fin)
+                | (LifecycleEventKind::Close, LifecycleFlag::Rst)
+        );
+        if !accepted {
+            return Ok(None);
+        }
+
+        return Ok(Some(AggregateEvent::Lifecycle(LifecycleEvent {
+            timestamp_micros,
+            src,
+            dst,
+            kind,
+            flag,
+        })));
+    }
+
+    Ok(None)
+}
+
+fn correlate_segment(segment: Segment) -> Vec<AggregateRecord> {
+    let mut records = Vec::new();
+
+    for (anchor_idx, anchor) in segment.fingerprints.iter().enumerate() {
+        if anchor.kind != FingerprintKind::Ja4 {
+            continue;
+        }
+
+        let mut seen_ja4h = HashSet::new();
+        let mut seen_ja4t = HashSet::new();
+
+        for candidate in segment.fingerprints.iter().skip(anchor_idx + 1) {
+            match candidate.kind {
+                FingerprintKind::Ja4H => {
+                    if seen_ja4h.insert(candidate.value.clone()) {
+                        records.push(AggregateRecord {
+                            anchor_timestamp_micros: anchor.timestamp_micros,
+                            src: anchor.src.clone(),
+                            dst: anchor.dst.clone(),
+                            ja4: anchor.value.clone(),
+                            ja4h: candidate.value.clone(),
+                            ja4t: String::new(),
+                        });
+                    }
+                }
+                FingerprintKind::Ja4T => {
+                    if seen_ja4t.insert(candidate.value.clone()) {
+                        records.push(AggregateRecord {
+                            anchor_timestamp_micros: anchor.timestamp_micros,
+                            src: anchor.src.clone(),
+                            dst: anchor.dst.clone(),
+                            ja4: anchor.value.clone(),
+                            ja4h: String::new(),
+                            ja4t: candidate.value.clone(),
+                        });
+                    }
+                }
+                FingerprintKind::Ja4 => {}
+            }
+        }
+    }
+
+    records
+}
+
+pub fn correlate_events(events: Vec<AggregateEvent>) -> Vec<AggregateRecord> {
+    let mut active_segments = HashMap::<CanonicalConnectionKey, Segment>::new();
+    let mut finished_segments = Vec::new();
+
+    for event in events {
+        match event {
+            AggregateEvent::Lifecycle(event) => {
+                let key = CanonicalConnectionKey::from_endpoints(&event.src, &event.dst);
+
+                match event.kind {
+                    LifecycleEventKind::Open => {
+                        if let Some(previous) = active_segments.insert(
+                            key.clone(),
+                            Segment {
+                                connection: key,
+                                fingerprints: Vec::new(),
+                            },
+                        ) {
+                            finished_segments.push(previous);
+                        }
+                    }
+                    LifecycleEventKind::Close => {
+                        if let Some(segment) = active_segments.remove(&key) {
+                            finished_segments.push(segment);
+                        }
+                    }
+                }
+            }
+            AggregateEvent::Fingerprint(event) => {
+                let key = CanonicalConnectionKey::from_endpoints(&event.src, &event.dst);
+                active_segments
+                    .entry(key.clone())
+                    .or_insert_with(|| Segment {
+                        connection: key,
+                        fingerprints: Vec::new(),
+                    })
+                    .fingerprints
+                    .push(event);
+            }
+        }
+    }
+
+    finished_segments.extend(active_segments.into_values());
+
+    let mut records = finished_segments
+        .into_iter()
+        .flat_map(correlate_segment)
+        .collect::<Vec<_>>();
+    records.sort_by(|left, right| {
+        left.anchor_timestamp_micros
+            .cmp(&right.anchor_timestamp_micros)
+            .then_with(|| left.src.cmp(&right.src))
+            .then_with(|| left.dst.cmp(&right.dst))
+            .then_with(|| left.ja4.cmp(&right.ja4))
+            .then_with(|| left.ja4h.cmp(&right.ja4h))
+            .then_with(|| left.ja4t.cmp(&right.ja4t))
+    });
+    records
+}
+
+pub fn aggregate_text(input: &str) -> Result<Vec<AggregateRecord>, String> {
+    let events = parse_aggregate_events(input)?;
+    Ok(correlate_events(events))
 }
 
 fn parse_timestamp_micros(value: &str) -> Result<i64, String> {
@@ -136,92 +352,9 @@ fn render_timestamp_micros(value: i64) -> String {
     format!("{secs}.{micros:06}")
 }
 
-pub fn correlate_events(
-    mut events: Vec<FingerprintEvent>,
-    window_secs: u64,
-) -> Vec<AggregateRecord> {
-    events.sort_by(|left, right| {
-        left.src
-            .cmp(&right.src)
-            .then_with(|| left.dst.cmp(&right.dst))
-            .then_with(|| left.timestamp_micros.cmp(&right.timestamp_micros))
-            .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
-            .then_with(|| left.value.cmp(&right.value))
-    });
-
-    let window_micros = (window_secs as i64).saturating_mul(1_000_000);
-    let mut records = Vec::new();
-
-    for (idx, anchor) in events.iter().enumerate() {
-        if anchor.kind != FingerprintKind::Ja4 {
-            continue;
-        }
-
-        let deadline = anchor.timestamp_micros.saturating_add(window_micros);
-        let mut seen_ja4h = HashSet::new();
-        let mut seen_ja4t = HashSet::new();
-
-        for candidate in events.iter().skip(idx + 1) {
-            if candidate.src != anchor.src || candidate.dst != anchor.dst {
-                if candidate.src > anchor.src
-                    || (candidate.src == anchor.src && candidate.dst > anchor.dst)
-                {
-                    break;
-                }
-                continue;
-            }
-
-            if candidate.timestamp_micros >= deadline {
-                break;
-            }
-
-            if candidate.timestamp_micros < anchor.timestamp_micros {
-                continue;
-            }
-
-            match candidate.kind {
-                FingerprintKind::Ja4H => {
-                    if seen_ja4h.insert(candidate.value.clone()) {
-                        records.push(AggregateRecord {
-                            anchor_timestamp_micros: anchor.timestamp_micros,
-                            window_secs,
-                            src: anchor.src.clone(),
-                            dst: anchor.dst.clone(),
-                            ja4: anchor.value.clone(),
-                            ja4h: candidate.value.clone(),
-                            ja4t: String::new(),
-                        });
-                    }
-                }
-                FingerprintKind::Ja4T => {
-                    if seen_ja4t.insert(candidate.value.clone()) {
-                        records.push(AggregateRecord {
-                            anchor_timestamp_micros: anchor.timestamp_micros,
-                            window_secs,
-                            src: anchor.src.clone(),
-                            dst: anchor.dst.clone(),
-                            ja4: anchor.value.clone(),
-                            ja4h: String::new(),
-                            ja4t: candidate.value.clone(),
-                        });
-                    }
-                }
-                FingerprintKind::Ja4 => {}
-            }
-        }
-    }
-
-    records
-}
-
-pub fn aggregate_text(input: &str, window_secs: u64) -> Result<Vec<AggregateRecord>, String> {
-    let events = parse_fingerprint_events(input)?;
-    Ok(correlate_events(events, window_secs))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{aggregate_text, parse_fingerprint_events};
+    use super::{aggregate_text, parse_aggregate_events, parse_fingerprint_events};
 
     #[test]
     fn parse_fingerprint_events_skips_lifecycle_and_summary_lines() {
@@ -248,7 +381,7 @@ ts=14.000000 mode=pcap kind=ja4t value=ja4t-a src=1.1.1.1:1111 dst=2.2.2.2:443
 ts=15.000000 mode=pcap kind=ja4h value=other src=9.9.9.9:9999 dst=2.2.2.2:443
 ";
 
-        let records = aggregate_text(input, 10).expect("aggregation should succeed");
+        let records = aggregate_text(input).expect("aggregation should succeed");
         let rendered = records
             .iter()
             .map(|record| record.render())
@@ -274,18 +407,151 @@ ts=15.000000 mode=pcap kind=ja4h value=other src=9.9.9.9:9999 dst=2.2.2.2:443
     }
 
     #[test]
-    fn aggregate_text_excludes_out_of_window_and_missing_ja4_pairs() {
+    fn aggregate_text_groups_by_tcp_session_without_time_window() {
         let input = "\
 ts=20.000000 mode=pcap kind=ja4 value=ja4-b src=1.1.1.1:1111 dst=2.2.2.2:443
-ts=35.000000 mode=pcap kind=ja4t value=too-late src=1.1.1.1:1111 dst=2.2.2.2:443
-ts=40.000000 mode=pcap kind=ja4h value=missing-anchor src=3.3.3.3:3333 dst=4.4.4.4:80
+ts=35.000000 mode=pcap kind=ja4t value=same-session-ja4t src=1.1.1.1:1111 dst=2.2.2.2:443
+ts=40.000000 mode=pcap kind=ja4h value=other-session-ja4h src=3.3.3.3:3333 dst=4.4.4.4:80
 ";
 
-        let records = aggregate_text(input, 10).expect("aggregation should succeed");
+        let records = aggregate_text(input).expect("aggregation should succeed");
+        let rendered = records
+            .iter()
+            .map(|record| record.render())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            records.len(),
+            1,
+            "same TCP session should correlate even when timestamps are far apart"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("ja4=ja4-b ja4h= ja4t=same-session-ja4t")),
+            "expected JA4 plus JA4T record from the same TCP session: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("other-session-ja4h")),
+            "different TCP sessions must not be merged: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_aggregate_text_parses_fingerprint_and_tcp_events() {
+        let input = "\
+ ts=10.000000 mode=pcap event=tcp_open flags=syn src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=10.100000 mode=pcap kind=ja4 value=ja4-a src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=10.200000 mode=pcap event=tcp_close flags=fin src=2.2.2.2:443 dst=1.1.1.1:1111
+";
+
+        let events = parse_aggregate_events(input).expect("event parse should succeed");
+
+        assert_eq!(events.len(), 3, "expected one open, one fingerprint, one close");
+    }
+
+    #[test]
+    fn lifecycle_aggregate_text_separates_reconnections_by_syn_and_fin() {
+        let input = "\
+ ts=1.000000 mode=pcap event=tcp_open flags=syn src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.100000 mode=pcap kind=ja4 value=ja4-a src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.200000 mode=pcap event=tcp_close flags=fin src=2.2.2.2:443 dst=1.1.1.1:1111
+ ts=2.000000 mode=pcap event=tcp_open flags=syn src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=2.100000 mode=pcap kind=ja4h value=ja4h-b src=1.1.1.1:1111 dst=2.2.2.2:443
+";
+
+        let records = aggregate_text(input).expect("aggregation should succeed");
 
         assert!(
             records.is_empty(),
-            "out-of-window and missing-anchor matches should be excluded"
+            "ja4 and ja4h from different lifecycle segments must not correlate"
+        );
+    }
+
+    #[test]
+    fn lifecycle_aggregate_text_uses_reverse_fin_to_close_current_segment() {
+        let input = "\
+ ts=1.000000 mode=pcap event=tcp_open flags=syn src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.100000 mode=pcap kind=ja4 value=ja4-a src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.200000 mode=pcap kind=ja4h value=ja4h-a src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.300000 mode=pcap event=tcp_close flags=fin src=2.2.2.2:443 dst=1.1.1.1:1111
+ ts=2.000000 mode=pcap kind=ja4t value=late-ja4t src=1.1.1.1:1111 dst=2.2.2.2:443
+";
+
+        let rendered = aggregate_text(input)
+            .expect("aggregation should succeed")
+            .into_iter()
+            .map(|record| record.render())
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 1, "only the first segment should produce a record");
+        assert!(
+            rendered[0].contains("ja4=ja4-a ja4h=ja4h-a ja4t="),
+            "expected ja4 plus ja4h: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("late-ja4t")),
+            "late ja4t must stay out of the closed segment: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_aggregate_text_uses_reverse_rst_to_close_current_segment() {
+        let input = "\
+ ts=1.000000 mode=pcap event=tcp_open flags=syn src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.100000 mode=pcap kind=ja4 value=ja4-a src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.200000 mode=pcap event=tcp_close flags=rst src=2.2.2.2:443 dst=1.1.1.1:1111
+ ts=2.000000 mode=pcap kind=ja4h value=late-ja4h src=1.1.1.1:1111 dst=2.2.2.2:443
+";
+
+        let records = aggregate_text(input).expect("aggregation should succeed");
+
+        assert!(
+            records.is_empty(),
+            "reverse rst should close the current segment before late ja4h arrives"
+        );
+    }
+
+    #[test]
+    fn lifecycle_aggregate_text_does_not_attach_pre_anchor_fingerprints_to_ja4() {
+        let input = "\
+ ts=1.000000 mode=pcap kind=ja4h value=early-ja4h src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=2.000000 mode=pcap kind=ja4 value=ja4-a src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=3.000000 mode=pcap kind=ja4t value=late-ja4t src=1.1.1.1:1111 dst=2.2.2.2:443
+";
+
+        let rendered = aggregate_text(input)
+            .expect("aggregation should succeed")
+            .into_iter()
+            .map(|record| record.render())
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 1, "only the post-anchor ja4t should correlate");
+        assert!(
+            rendered[0].contains("ja4=ja4-a ja4h= ja4t=late-ja4t"),
+            "expected only post-anchor ja4t: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|line| line.contains("early-ja4h")),
+            "pre-anchor ja4h must not correlate: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_aggregate_text_keeps_close_before_reopen_when_timestamps_match() {
+        let input = "\
+ ts=1.000000 mode=pcap event=tcp_open flags=syn src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.000000 mode=pcap kind=ja4 value=ja4-a src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.000000 mode=pcap event=tcp_close flags=fin src=2.2.2.2:443 dst=1.1.1.1:1111
+ ts=1.000000 mode=pcap event=tcp_open flags=syn src=1.1.1.1:1111 dst=2.2.2.2:443
+ ts=1.000000 mode=pcap kind=ja4h value=ja4h-b src=1.1.1.1:1111 dst=2.2.2.2:443
+";
+
+        let records = aggregate_text(input).expect("aggregation should succeed");
+
+        assert!(
+            records.is_empty(),
+            "close and reopen events at the same timestamp must still respect text order"
         );
     }
 }

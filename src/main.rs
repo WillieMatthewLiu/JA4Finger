@@ -15,7 +15,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Daemon { config } => daemon_command::run(config, &runtime_state),
         Command::Pcap { file } => pcap_command::run(file, &runtime_state),
-        Command::Aggregate { file, window_secs } => aggregate_command::run(file, window_secs),
+        Command::Aggregate { file } => aggregate_command::run(file),
     };
 
     match result {

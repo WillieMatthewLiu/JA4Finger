@@ -23,8 +23,16 @@ pub struct FlowKey {
 pub struct DecodedPacket {
     pub flow_key: FlowKey,
     pub payload: Vec<u8>,
+    pub tcp_flags: Option<TcpFlags>,
     pub timestamp_secs: i64,
     pub timestamp_micros: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpFlags {
+    pub syn: bool,
+    pub fin: bool,
+    pub rst: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -183,7 +191,7 @@ impl Pipeline {
             NetSlice::Arp(_) => return Err(DecodeError::UnsupportedNetwork),
         };
 
-        let (src_port, dst_port, protocol, payload) = match sliced
+        let (src_port, dst_port, protocol, payload, tcp_flags) = match sliced
             .transport
             .as_ref()
             .ok_or(DecodeError::MissingTransportLayer)?
@@ -193,12 +201,18 @@ impl Pipeline {
                 tcp.destination_port(),
                 TransportProtocol::Tcp,
                 tcp.payload().to_vec(),
+                Some(TcpFlags {
+                    syn: tcp.syn(),
+                    fin: tcp.fin(),
+                    rst: tcp.rst(),
+                }),
             ),
             TransportSlice::Udp(udp) => (
                 udp.source_port(),
                 udp.destination_port(),
                 TransportProtocol::Udp,
                 udp.payload().to_vec(),
+                None,
             ),
             _ => return Err(DecodeError::MissingTransportLayer),
         };
@@ -212,6 +226,7 @@ impl Pipeline {
                 protocol,
             },
             payload,
+            tcp_flags,
             timestamp_secs: record.timestamp_secs,
             timestamp_micros: record.timestamp_micros,
         })
@@ -224,7 +239,9 @@ mod tests {
 
     use crate::capture::PacketRecord;
 
-    use super::{FlowKey, Pipeline, PipelineRuntime, SessionTracker, TransportProtocol};
+    use super::{
+        FlowKey, Pipeline, PipelineRuntime, SessionTracker, TcpFlags, TransportProtocol,
+    };
 
     fn tcp_record(payload: &[u8]) -> PacketRecord {
         let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
@@ -239,6 +256,79 @@ mod tests {
         PacketRecord {
             timestamp_secs: 100,
             timestamp_micros: 200,
+            captured_len: packet.len() as u32,
+            original_len: packet.len() as u32,
+            data: packet,
+        }
+    }
+
+    fn udp_record(payload: &[u8]) -> PacketRecord {
+        let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+            .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
+            .udp(5353, 53);
+
+        let mut packet = Vec::with_capacity(builder.size(payload.len()));
+        builder
+            .write(&mut packet, payload)
+            .expect("packet should be serializable");
+
+        PacketRecord {
+            timestamp_secs: 103,
+            timestamp_micros: 500,
+            captured_len: packet.len() as u32,
+            original_len: packet.len() as u32,
+            data: packet,
+        }
+    }
+
+    fn tcp_syn_record() -> PacketRecord {
+        let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+            .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
+            .tcp(42424, 443, 1, 4096)
+            .syn();
+
+        let mut packet = Vec::with_capacity(builder.size(0));
+        builder.write(&mut packet, &[]).expect("packet should serialize");
+
+        PacketRecord {
+            timestamp_secs: 100,
+            timestamp_micros: 200,
+            captured_len: packet.len() as u32,
+            original_len: packet.len() as u32,
+            data: packet,
+        }
+    }
+
+    fn tcp_fin_record() -> PacketRecord {
+        let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+            .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
+            .tcp(42424, 443, 2, 4096)
+            .fin();
+
+        let mut packet = Vec::with_capacity(builder.size(0));
+        builder.write(&mut packet, &[]).expect("packet should serialize");
+
+        PacketRecord {
+            timestamp_secs: 101,
+            timestamp_micros: 300,
+            captured_len: packet.len() as u32,
+            original_len: packet.len() as u32,
+            data: packet,
+        }
+    }
+
+    fn tcp_rst_record() -> PacketRecord {
+        let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+            .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
+            .tcp(42424, 443, 3, 4096)
+            .rst();
+
+        let mut packet = Vec::with_capacity(builder.size(0));
+        builder.write(&mut packet, &[]).expect("packet should serialize");
+
+        PacketRecord {
+            timestamp_secs: 102,
+            timestamp_micros: 400,
             captured_len: packet.len() as u32,
             original_len: packet.len() as u32,
             data: packet,
@@ -316,5 +406,58 @@ mod tests {
         assert!(result.is_err(), "invalid packet should return an error");
         assert_eq!(runtime.counters().packets_seen, 1);
         assert_eq!(runtime.counters().parse_failures, 1);
+    }
+
+    #[test]
+    fn lifecycle_decode_extracts_tcp_flags_for_syn_fin_and_rst_packets() {
+        let syn = Pipeline::decode(&tcp_syn_record()).expect("syn packet should decode");
+        let fin = Pipeline::decode(&tcp_fin_record()).expect("fin packet should decode");
+        let rst = Pipeline::decode(&tcp_rst_record()).expect("rst packet should decode");
+
+        assert_eq!(
+            syn.tcp_flags,
+            Some(TcpFlags {
+                syn: true,
+                fin: false,
+                rst: false,
+            })
+        );
+        assert_eq!(
+            fin.tcp_flags,
+            Some(TcpFlags {
+                syn: false,
+                fin: true,
+                rst: false,
+            })
+        );
+        assert_eq!(
+            rst.tcp_flags,
+            Some(TcpFlags {
+                syn: false,
+                fin: false,
+                rst: true,
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_decode_extracts_tcp_flags_for_non_lifecycle_tcp_packet() {
+        let decoded = Pipeline::decode(&tcp_record(b"ping")).expect("tcp packet should decode");
+
+        assert_eq!(
+            decoded.tcp_flags,
+            Some(TcpFlags {
+                syn: false,
+                fin: false,
+                rst: false,
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_decode_sets_tcp_flags_none_for_udp_packets() {
+        let decoded = Pipeline::decode(&udp_record(b"dns")).expect("udp packet should decode");
+
+        assert_eq!(decoded.tcp_flags, None);
     }
 }

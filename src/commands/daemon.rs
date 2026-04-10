@@ -79,7 +79,7 @@ fn env_flag(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use etherparse::PacketBuilder;
+    use etherparse::{PacketBuilder, TcpOptionElement};
 
     use crate::capture::PacketRecord;
     use crate::config::parse_daemon_config;
@@ -102,6 +102,57 @@ mod tests {
         PacketRecord {
             timestamp_secs: 1,
             timestamp_micros: 2,
+            captured_len: packet.len() as u32,
+            original_len: packet.len() as u32,
+            data: packet,
+        }
+    }
+
+    fn tcp_syn_record() -> PacketRecord {
+        let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+            .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
+            .tcp(42424, 443, 1, 64240)
+            .syn()
+            .options(&[
+                TcpOptionElement::MaximumSegmentSize(1460),
+                TcpOptionElement::Noop,
+                TcpOptionElement::WindowScale(8),
+                TcpOptionElement::Noop,
+                TcpOptionElement::Noop,
+                TcpOptionElement::SelectiveAcknowledgementPermitted,
+            ])
+            .expect("tcp syn options should be valid");
+
+        let payload = [];
+        let mut packet = Vec::with_capacity(builder.size(payload.len()));
+        builder
+            .write(&mut packet, &payload)
+            .expect("packet should serialize");
+
+        PacketRecord {
+            timestamp_secs: 1,
+            timestamp_micros: 2,
+            captured_len: packet.len() as u32,
+            original_len: packet.len() as u32,
+            data: packet,
+        }
+    }
+
+    fn http1_fin_record() -> PacketRecord {
+        let payload = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let builder = PacketBuilder::ethernet2([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12])
+            .ipv4([192, 168, 1, 10], [192, 168, 1, 20], 32)
+            .tcp(42424, 80, 2, 4096)
+            .fin();
+
+        let mut packet = Vec::with_capacity(builder.size(payload.len()));
+        builder
+            .write(&mut packet, payload)
+            .expect("packet should serialize");
+
+        PacketRecord {
+            timestamp_secs: 3,
+            timestamp_micros: 4,
             captured_len: packet.len() as u32,
             original_len: packet.len() as u32,
             data: packet,
@@ -178,5 +229,65 @@ mod tests {
         assert_eq!(counters.parse_failures, 0);
         assert_eq!(counters.extraction_failures, 0);
         assert_eq!(summary.fingerprints_emitted, 0);
+    }
+
+    #[test]
+    fn lifecycle_process_runtime_record_emits_tcp_open_before_ja4t_for_syn_packets() {
+        let state = RuntimeState::default();
+        let mut runtime = PipelineRuntime::default();
+        let mut lines = Vec::new();
+
+        process_runtime_record(
+            &state,
+            &mut runtime,
+            RuntimeMode::Daemon,
+            tcp_syn_record(),
+            None,
+            &mut |line| {
+                lines.push(line);
+                Ok(())
+            },
+        )
+        .expect("syn packet should process cleanly");
+
+        assert_eq!(lines.len(), 2, "syn packet should emit open then ja4t");
+        assert!(
+            lines[0].contains("event=tcp_open flags=syn"),
+            "first line should open: {lines:?}"
+        );
+        assert!(
+            lines[1].contains("kind=ja4t"),
+            "second line should be ja4t: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_process_runtime_record_emits_ja4h_before_tcp_close_for_fin_packets() {
+        let state = RuntimeState::default();
+        let mut runtime = PipelineRuntime::default();
+        let mut lines = Vec::new();
+
+        process_runtime_record(
+            &state,
+            &mut runtime,
+            RuntimeMode::Daemon,
+            http1_fin_record(),
+            None,
+            &mut |line| {
+                lines.push(line);
+                Ok(())
+            },
+        )
+        .expect("fin packet should process cleanly");
+
+        assert_eq!(lines.len(), 2, "fin packet should emit ja4h then close");
+        assert!(
+            lines[0].contains("kind=ja4h"),
+            "first line should be ja4h: {lines:?}"
+        );
+        assert!(
+            lines[1].contains("event=tcp_close flags=fin"),
+            "second line should be close fin: {lines:?}"
+        );
     }
 }

@@ -82,6 +82,13 @@ impl RuntimeMode {
     }
 }
 
+fn format_endpoint(ip: &str, port: u16) -> String {
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V6(_)) => format!("[{ip}]:{port}"),
+        _ => format!("{ip}:{port}"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FingerprintEmission {
     pub timestamp_secs: i64,
@@ -94,13 +101,6 @@ pub struct FingerprintEmission {
 }
 
 impl FingerprintEmission {
-    fn format_endpoint(ip: &str, port: u16) -> String {
-        match ip.parse::<IpAddr>() {
-            Ok(IpAddr::V6(_)) => format!("[{ip}]:{port}"),
-            _ => format!("{ip}:{port}"),
-        }
-    }
-
     pub fn from_packet_context(
         record: &PacketRecord,
         decoded: &DecodedPacket,
@@ -114,14 +114,8 @@ impl FingerprintEmission {
             mode,
             kind,
             value: value.into(),
-            src_endpoint: Self::format_endpoint(
-                &decoded.flow_key.src_ip,
-                decoded.flow_key.src_port,
-            ),
-            dst_endpoint: Self::format_endpoint(
-                &decoded.flow_key.dst_ip,
-                decoded.flow_key.dst_port,
-            ),
+            src_endpoint: format_endpoint(&decoded.flow_key.src_ip, decoded.flow_key.src_port),
+            dst_endpoint: format_endpoint(&decoded.flow_key.dst_ip, decoded.flow_key.dst_port),
         }
     }
 
@@ -133,6 +127,82 @@ impl FingerprintEmission {
             self.mode.as_str(),
             self.kind.as_str(),
             self.value,
+            self.src_endpoint,
+            self.dst_endpoint
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TcpLifecycleEvent {
+    Open,
+    Close,
+}
+
+impl TcpLifecycleEvent {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "tcp_open",
+            Self::Close => "tcp_close",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TcpLifecycleFlag {
+    Syn,
+    Fin,
+    Rst,
+}
+
+impl TcpLifecycleFlag {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Syn => "syn",
+            Self::Fin => "fin",
+            Self::Rst => "rst",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpLifecycleEmission {
+    pub timestamp_secs: i64,
+    pub timestamp_micros: i64,
+    pub mode: RuntimeMode,
+    pub event: TcpLifecycleEvent,
+    pub flag: TcpLifecycleFlag,
+    pub src_endpoint: String,
+    pub dst_endpoint: String,
+}
+
+impl TcpLifecycleEmission {
+    pub fn from_packet_context(
+        record: &PacketRecord,
+        decoded: &DecodedPacket,
+        mode: RuntimeMode,
+        event: TcpLifecycleEvent,
+        flag: TcpLifecycleFlag,
+    ) -> Self {
+        Self {
+            timestamp_secs: record.timestamp_secs,
+            timestamp_micros: record.timestamp_micros,
+            mode,
+            event,
+            flag,
+            src_endpoint: format_endpoint(&decoded.flow_key.src_ip, decoded.flow_key.src_port),
+            dst_endpoint: format_endpoint(&decoded.flow_key.dst_ip, decoded.flow_key.dst_port),
+        }
+    }
+
+    pub fn render(&self) -> String {
+        format!(
+            "ts={}.{:06} mode={} event={} flags={} src={} dst={}",
+            self.timestamp_secs,
+            self.timestamp_micros,
+            self.mode.as_str(),
+            self.event.as_str(),
+            self.flag.as_str(),
             self.src_endpoint,
             self.dst_endpoint
         )
@@ -174,9 +244,12 @@ mod tests {
 
     use crate::capture::PacketRecord;
     use crate::fingerprint::FingerprintKind;
-    use crate::pipeline::{DecodedPacket, FlowKey, RuntimeCounters, TransportProtocol};
+    use crate::pipeline::{DecodedPacket, FlowKey, RuntimeCounters, TcpFlags, TransportProtocol};
 
-    use super::{DaemonFileOutput, FingerprintEmission, RuntimeMode, SummaryReport};
+    use super::{
+        DaemonFileOutput, FingerprintEmission, RuntimeMode, SummaryReport, TcpLifecycleEmission,
+        TcpLifecycleEvent, TcpLifecycleFlag,
+    };
 
     #[test]
     fn fingerprint_emission_renders_required_fields() {
@@ -210,6 +283,104 @@ mod tests {
             rendered.contains("dst=192.168.1.20:443"),
             "missing destination endpoint: {rendered}"
         );
+    }
+
+    #[test]
+    fn lifecycle_emission_renders_required_fields() {
+        let emission = TcpLifecycleEmission {
+            timestamp_secs: 1710000000,
+            timestamp_micros: 123456,
+            mode: RuntimeMode::Pcap,
+            event: TcpLifecycleEvent::Open,
+            flag: TcpLifecycleFlag::Syn,
+            src_endpoint: "10.0.0.1:12345".into(),
+            dst_endpoint: "10.0.0.2:443".into(),
+        };
+
+        assert_eq!(
+            emission.render(),
+            "ts=1710000000.123456 mode=pcap event=tcp_open flags=syn src=10.0.0.1:12345 dst=10.0.0.2:443"
+        );
+    }
+
+    #[test]
+    fn lifecycle_emission_from_packet_context_populates_ipv4_endpoints_and_timestamps() {
+        let record = PacketRecord {
+            timestamp_secs: 1710000099,
+            timestamp_micros: 654321,
+            captured_len: 10,
+            original_len: 10,
+            data: vec![],
+        };
+        let decoded = DecodedPacket {
+            flow_key: FlowKey {
+                src_ip: "10.0.0.1".into(),
+                dst_ip: "10.0.0.2".into(),
+                src_port: 12345,
+                dst_port: 443,
+                protocol: TransportProtocol::Tcp,
+            },
+            payload: vec![],
+            tcp_flags: Some(TcpFlags {
+                syn: false,
+                fin: false,
+                rst: false,
+            }),
+            timestamp_secs: 0,
+            timestamp_micros: 0,
+        };
+
+        let emission = TcpLifecycleEmission::from_packet_context(
+            &record,
+            &decoded,
+            RuntimeMode::Pcap,
+            TcpLifecycleEvent::Open,
+            TcpLifecycleFlag::Syn,
+        );
+
+        assert_eq!(emission.timestamp_secs, 1710000099);
+        assert_eq!(emission.timestamp_micros, 654321);
+        assert_eq!(emission.src_endpoint, "10.0.0.1:12345");
+        assert_eq!(emission.dst_endpoint, "10.0.0.2:443");
+    }
+
+    #[test]
+    fn lifecycle_emission_from_packet_context_brackets_ipv6_endpoints() {
+        let record = PacketRecord {
+            timestamp_secs: 1710000100,
+            timestamp_micros: 111222,
+            captured_len: 10,
+            original_len: 10,
+            data: vec![],
+        };
+        let decoded = DecodedPacket {
+            flow_key: FlowKey {
+                src_ip: "2001:db8::10".into(),
+                dst_ip: "2001:db8::20".into(),
+                src_port: 12345,
+                dst_port: 443,
+                protocol: TransportProtocol::Tcp,
+            },
+            payload: vec![],
+            tcp_flags: Some(TcpFlags {
+                syn: false,
+                fin: false,
+                rst: false,
+            }),
+            timestamp_secs: 0,
+            timestamp_micros: 0,
+        };
+
+        let emission = TcpLifecycleEmission::from_packet_context(
+            &record,
+            &decoded,
+            RuntimeMode::Pcap,
+            TcpLifecycleEvent::Close,
+            TcpLifecycleFlag::Fin,
+        );
+
+        assert_eq!(emission.src_endpoint, "[2001:db8::10]:12345");
+        assert_eq!(emission.dst_endpoint, "[2001:db8::20]:443");
     }
 
     #[test]
@@ -268,6 +439,11 @@ mod tests {
                 protocol: TransportProtocol::Tcp,
             },
             payload: vec![],
+            tcp_flags: Some(TcpFlags {
+                syn: false,
+                fin: false,
+                rst: false,
+            }),
             timestamp_secs: 0,
             timestamp_micros: 0,
         };
@@ -307,6 +483,11 @@ mod tests {
                 protocol: TransportProtocol::Tcp,
             },
             payload: vec![],
+            tcp_flags: Some(TcpFlags {
+                syn: false,
+                fin: false,
+                rst: false,
+            }),
             timestamp_secs: 0,
             timestamp_micros: 0,
         };

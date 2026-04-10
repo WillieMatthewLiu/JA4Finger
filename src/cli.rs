@@ -26,9 +26,6 @@ pub enum Command {
         /// Path to a text file produced by daemon logs or pcap output
         #[arg(long)]
         file: String,
-        /// Correlation window in seconds, anchored on each JA4 event
-        #[arg(long)]
-        window_secs: u64,
     },
 }
 

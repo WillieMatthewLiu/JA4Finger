@@ -69,14 +69,14 @@ ja4finger <COMMAND>
 ```bash
 ja4finger daemon --config <FILE>
 ja4finger pcap --file <FILE>
-ja4finger aggregate --file <FILE> --window-secs <SECONDS>
+ja4finger aggregate --file <FILE>
 ```
 
 如果还没有安装到系统路径，可以直接用 `cargo run`：
 
 ```bash
 cargo run -- daemon --config ./daemon.yaml
-cargo run -- aggregate --file ./logs/20260403-ja4finger.log --window-secs 300
+cargo run -- aggregate --file ./logs/20260403-ja4finger.log
 cargo run -- pcap --file ./sample.pcap
 ```
 
@@ -88,24 +88,29 @@ cargo run -- pcap --file ./sample.pcap
 ./target/debug/ja4finger pcap --file ./sample.pcap
 ```
 
-常见输出包含两类：
+常见 `pcap` 输出会混合三类内容：
 
-1. 指纹输出
-2. 运行摘要
+1. TCP 生命周期事件
+2. 指纹输出
+3. 运行摘要
 
 示例：
 
 ```text
-ts=1.000000 mode=pcap kind=ja4h value=ge11cr04enus_33f7519adbc8_6263fd0189b4_230379c57c15 src=192.168.1.10:42424 dst=192.168.1.20:80
-mode=pcap packets_seen=1 flows_tracked=1 fingerprints_emitted=1 parse_failures=0 extraction_failures=0
+ts=1.000000 mode=pcap event=tcp_open flags=syn src=192.168.1.10:42424 dst=192.168.1.20:443
+ts=1.000000 mode=pcap kind=ja4t value=64240_2-1-3-1-1-4_1460_8 src=192.168.1.10:42424 dst=192.168.1.20:443
+ts=2.000000 mode=pcap event=tcp_close flags=fin src=192.168.1.20:443 dst=192.168.1.10:42424
+mode=pcap packets_seen=2 flows_tracked=1 fingerprints_emitted=1 parse_failures=0 extraction_failures=1
 ```
 
 字段说明：
 
 - `ts`：包时间戳
 - `mode`：运行模式，`pcap` 或 `daemon`
+- `event`：生命周期事件类型，`tcp_open` 或 `tcp_close`
+- `flags`：触发生命周期事件的 TCP 标志位，`syn` / `fin` / `rst`
 - `kind`：指纹类型，`ja4` / `ja4h` / `ja4t`
-- `value`：指纹值
+- `value`：指纹值，仅出现在指纹行
 - `src` / `dst`：源和目标端点
 - `packets_seen`：处理过的包数
 - `flows_tracked`：当前跟踪到的流数
@@ -161,23 +166,32 @@ daemon:
 示例：
 
 ```bash
-./target/debug/ja4finger aggregate --file ./logs/20260403-ja4finger.log --window-secs 300
+./target/debug/ja4finger aggregate --file ./logs/20260403-ja4finger.log
 ```
 
 输出规则：
 
-- 只读取带有 `ts`、`kind`、`value`、`src`、`dst` 的指纹行
+- 会同时读取指纹事件和 `tcp_open` / `tcp_close` 生命周期事件
 - 自动跳过 `status` 行和 summary 行
-- 按完整 `src` + `dst` 端点聚合，包含端口
-- 以每条 `ja4` 为锚点，在 `[ja4_ts, ja4_ts + window_secs)` 内查找同一 `src/dst` 的 `ja4h` 或 `ja4t`
+- 内部按双向 canonical 连接键聚合，服务端方向的 `FIN` / `RST` 也会关闭同一条连接
+- 这里的 canonical 连接键由两个完整 endpoint 文本组成，包含 IP 和端口；`aggregate` 会把这两个 endpoint 按稳定字典序排序后组成无向二元组，因此 `src=a dst=b` 和 `src=b dst=a` 会命中同一个连接键
+- `aggregate` 按输入文件中的事件顺序处理，不会按 `ts` 重新排序；如果多条事件时间戳相同，以文件行顺序为准
+- `tcp_open flags=syn` 会为对应 canonical 连接键开启一个 segment；如果该连接当前已经有未关闭的 segment，则旧 segment 会立刻结束并开启新 segment
+- `tcp_close flags=fin` 或 `tcp_close flags=rst` 会关闭当前打开的 segment；如果该连接当前没有打开的 segment，则这条 close 事件会被忽略
+- 只在同一个 lifecycle segment 内关联 `ja4`、`ja4h`、`ja4t`
+- 每条 `ja4` 仍然是独立锚点，只会关联同一 segment 内、且在该 `ja4` 之后出现的 `ja4h` / `ja4t`
+- 如果某个连接先读到指纹事件、还没读到任何 `tcp_open`，`aggregate` 会只为这个 canonical 连接键创建一个隐式 segment；这个 fallback 是按连接逐条触发的，不是整文件开关
+- 旧日志或截断日志因此仍可被处理，但如果同一组端点重复复用、又缺少 `SYN` / `FIN` / `RST` 边界，隐式 segment 可能把本应分开的连接合并在一起
 - 只有存在 `ja4 + ja4h` 或 `ja4 + ja4t` 关联时才输出
 - 相同锚点下的重复 `ja4h` / `ja4t` 值会去重，但不会把 `ja4h` 和 `ja4t` 压成同一条组合记录
+- 输出里的 `src` / `dst` 方向保留 `ja4` 锚点的原始方向，不会改写成 canonical 排序
+- 空字段会渲染为空字符串，因此 `ja4h= ja4t=...` 表示该条记录没有 `ja4h`
 
 示例输出：
 
 ```text
-anchor_ts=10.000000 window_secs=300 src=192.168.1.10:42424 dst=192.168.1.20:443 ja4=ja4-alpha ja4h=ja4h-alpha ja4t=
-anchor_ts=10.000000 window_secs=300 src=192.168.1.10:42424 dst=192.168.1.20:443 ja4=ja4-alpha ja4h= ja4t=ja4t-alpha
+anchor_ts=10.000000 src=192.168.1.10:42424 dst=192.168.1.20:443 ja4=ja4-alpha ja4h=ja4h-alpha ja4t=
+anchor_ts=10.000000 src=192.168.1.10:42424 dst=192.168.1.20:443 ja4=ja4-alpha ja4h= ja4t=ja4t-alpha
 ```
 
 ## 源码结构
